@@ -724,10 +724,11 @@ if (CAPTURE) {
   let last = performance.now(), t0 = last, warm = 0;
   const loop = now => {
     let dt = (now - last) / 1000; last = now;
+    const raw = dt * 1000;
     if (dt > 0.1) dt = 0.1;
     if (BENCH) {
-      if (warm < WARM) { warm++; if (warm === WARM) { measuring = true; t0 = now; nf = 0; } }
-      else if (nf < MAXF) { ft[nf++] = dt * 1000; }
+      if (warm < WARM) { warm++; if (warm === WARM) { measuring = true; t0 = now; nf = 0; window.__m = 1; } }
+      else if (nf < MAXF) { ft[nf++] = raw; }
       const el = (now - t0) / 1000;
       zoomT = 22 + 8 * Math.sin(el * 0.21);
       if (measuring && el >= 60) { measuring = false; finishBench(); }

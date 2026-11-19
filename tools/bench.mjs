@@ -10,7 +10,7 @@ const p = await b.newPage({ viewport: { width: +W, height: +H } });
 p.on('pageerror', e => console.log('pageerror:', e.message));
 const cdp = await p.context().newCDPSession(p);
 await p.goto(`http://localhost:${srv.address().port}/?bench&w=${W}&h=${H}${extra}`);
-await p.waitForTimeout(3000);
+await p.waitForFunction('window.__m === 1', null, { timeout: 600000, polling: 200 });
 await cdp.send('HeapProfiler.enable');
 await cdp.send('HeapProfiler.startSampling', { samplingInterval: 128, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
 await p.waitForFunction('window.__bench', null, { timeout: 400000, polling: 1000 });
