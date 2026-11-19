@@ -5,6 +5,7 @@ const BENCH = Q.has('bench');
 const SHOT = Q.has('shot') ? +Q.get('shot') : -1;
 const CAPTURE = Q.has('capture') || SHOT >= 0;
 const MSAA = 4;
+const WARM = Q.has('warm') ? +Q.get('warm') : 60;
 const SHADOW = 2048;
 const WORLD_R = 720;
 const PITCH = 0.56, YAW = Math.PI / 4;
@@ -725,7 +726,7 @@ if (CAPTURE) {
     let dt = (now - last) / 1000; last = now;
     if (dt > 0.1) dt = 0.1;
     if (BENCH) {
-      if (warm < 60) { warm++; if (warm === 60) { measuring = true; t0 = now; nf = 0; } }
+      if (warm < WARM) { warm++; if (warm === WARM) { measuring = true; t0 = now; nf = 0; } }
       else if (nf < MAXF) { ft[nf++] = dt * 1000; }
       const el = (now - t0) / 1000;
       zoomT = 22 + 8 * Math.sin(el * 0.21);
