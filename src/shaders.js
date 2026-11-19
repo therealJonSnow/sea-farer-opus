@@ -88,9 +88,9 @@ fn shadow(wp: vec3f, n: vec3f) -> f32 {
   return a / 9.0;
 }
 // painterly toon light
-fn light(n: vec3f, sh: f32, wp: vec3f) -> vec3f {
+fn light(n: vec3f, sh: f32, wp: vec3f, cl: f32) -> vec3f {
   let ndl = dot(n, f.sun.xyz);
-  let l = smoothstep(-0.1, 0.32, ndl + 0.06 * (vn(wp.xz * 0.7 + wp.y) - 0.5)) * sh * cloud(wp.xz);
+  let l = smoothstep(-0.1, 0.32, ndl + 0.06 * (vn(wp.xz * 0.7 + wp.y) - 0.5)) * sh * cl;
   let hi = smoothstep(0.62, 0.8, ndl) * sh;
   let shade = vec3f(0.42, 0.47, 0.72);
   let warm = vec3f(1.06, 1.0, 0.92);
@@ -113,7 +113,7 @@ struct VIn {
 struct VOut {
   @builtin(position) pos: vec4f,
   @location(0) wp: vec3f, @location(1) n: vec3f, @location(2) c: vec4f,
-  @location(3) @interpolate(flat) m: vec4u, @location(4) lp: vec3f,
+  @location(3) @interpolate(flat) m: vec4u, @location(4) lp: vec3f, @location(5) cl: f32,
 };
 fn ry(v: vec3f, a: f32) -> vec3f { let c = cos(a); let s = sin(a); return vec3f(v.x * c + v.z * s, v.y, -v.x * s + v.z * c); }
 fn rz(v: vec3f, a: f32) -> vec3f { let c = cos(a); let s = sin(a); return vec3f(v.x * c + v.y * s, -v.x * s + v.y * c, v.z); }
@@ -229,6 +229,7 @@ fn xform(i: VIn) -> X {
   let x = xform(i);
   var o: VOut;
   o.pos = f.vp * vec4f(x.p, 1.0); o.wp = x.p; o.n = x.n; o.c = i.c; o.m = i.m; o.lp = i.p;
+  o.cl = cloud(x.p.xz); // cloud shadow has 6+ unit features: per vertex is exact enough
   return o;
 }
 @vertex fn vsShadow(i: VIn) -> @builtin(position) vec4f { let x = xform(i); return f.svp * vec4f(x.p, 1.0); }
@@ -302,7 +303,7 @@ fn terrainCol(wp: vec3f, n: vec3f) -> vec3f {
   } else if (kind == 1u || kind == 2u) { mat = 6.0; }
   else { mat = 7.0; }
   let sh = shadow(v.wp, n);
-  var col = lin(c) * light(n, sh, v.wp);
+  var col = lin(c) * light(n, sh, v.wp, v.cl);
   col = mix(col, lin(vec3f(0.96, 0.99, 1.0)) * mix(0.85, 1.0, sh), sea);
   // rim of warm light
   col += lin(c) * 0.12 * pow(1.0 - abs(dot(n, f.cf.xyz)), 3.0);
@@ -548,10 +549,21 @@ export const POST = /* wgsl */`
 @group(1) @binding(1) var aTex: texture_2d<f32>;
 @group(1) @binding(2) var ls: sampler;
 @group(1) @binding(3) var dTex: texture_depth_multisampled_2d;
+@group(1) @binding(4) var nTex: texture_2d<f32>;
 fn D(p: vec2i) -> f32 { return textureLoad(dTex, clamp(p, vec2i(0), vec2i(f.rs.xy) - 1), 0) * 449.0; }
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
   let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
   return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+// static screen-space paper noise, baked once per canvas size: wobble xy, paper grain, pigment density offset
+@fragment fn fsNoise(@builtin(position) fc: vec4f) -> @location(0) vec4f {
+  let fp = fc.xy / (f.scr.y / 1440.0);
+  let wob = vec2f(vn(fp * 0.018), vn(fp * 0.018 + 7.3));
+  let paper = vn(fp * 0.9) * 0.45 + vn(fp * 2.3) * 0.3 + vn(vec2f(fp.x * 0.22, fp.y * 2.6)) * 0.25;
+  let gran = vn(fp * 0.45 + vec2f(13.0));
+  let turb = fbm(fp * 0.006);
+  let dens = 0.34 * (paper - 0.5) + 0.42 * (turb - 0.5) + 0.18 * (gran - 0.5);
+  return vec4f(wob, paper, dens + 0.5);
 }
 fn A(uv: vec2f) -> vec4f { return textureSampleLevel(aTex, ls, uv, 0.0); }
 fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)); }
@@ -560,7 +572,8 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   let s = res.y / 1440.0; // scale effects with resolution
   let fp = fc.xy / s;
   // hand-painted wobble
-  let wob = vec2f(vn(fp * 0.018), vn(fp * 0.018 + 7.3)) - 0.5;
+  let nz = textureLoad(nTex, vec2i(fc.xy), 0);
+  let wob = nz.xy - 0.5;
   let uv = (fc.xy + wob * 2.2 * s) * px;
   let c0 = textureSampleLevel(cTex, ls, uv, 0.0).rgb;
   let a0 = A(uv);
@@ -597,10 +610,8 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   var c = c0;
   let pool = clamp(length(c - m) * 2.2, 0.0, 1.0);
   // paper + pigment density
-  let paper = vn(fp * 0.9) * 0.45 + vn(fp * 2.3) * 0.3 + vn(vec2f(fp.x * 0.22, fp.y * 2.6)) * 0.25;
-  let gran = vn(fp * 0.45 + vec2f(13.0)) ;
-  let turb = fbm(fp * 0.006);
-  let dens = 1.0 + 0.34 * (paper - 0.5) + 0.42 * (turb - 0.5) + 0.18 * (gran - 0.5) + 0.7 * pool;
+  let paper = nz.z;
+  let dens = 0.5 + nz.w + 0.7 * pool;
   // darken toward denser pigment (Bousseau-style)
   c = c - (c - c * c) * (dens - 1.0) * 1.4;
   c = clamp(c, vec3f(0.0), vec3f(1.0));

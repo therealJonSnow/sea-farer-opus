@@ -4,6 +4,8 @@ const Q = new URLSearchParams(location.search);
 const BENCH = Q.has('bench');
 const SHOT = Q.has('shot') ? +Q.get('shot') : -1;
 const CAPTURE = Q.has('capture') || SHOT >= 0;
+// ?shot=K&gpubench: re-render one fixed pose many times with the GPU saturated -> robust per-pass GPU cost for A/B work
+const GB = SHOT >= 0 && Q.has('gpubench');
 const MSAA = 4;
 const WARM = Q.has('warm') ? +Q.get('warm') : 60;
 const SHADOW = 2048;
@@ -556,7 +558,7 @@ const g0L = device.createBindGroupLayout({ entries: [
 const g1L = device.createBindGroupLayout({ entries: [
   { binding: 0, visibility: 2, texture: { sampleType: 'depth' } }, { binding: 1, visibility: 2, sampler: { type: 'comparison' } }] });
 const gpL = device.createBindGroupLayout({ entries: [
-  { binding: 0, visibility: 2, texture: { sampleType: 'float' } }, { binding: 1, visibility: 2, texture: { sampleType: 'float' } }, { binding: 2, visibility: 2, sampler: { type: 'filtering' } }, { binding: 3, visibility: 2, texture: { sampleType: 'depth', multisampled: true } }] });
+  { binding: 0, visibility: 2, texture: { sampleType: 'float' } }, { binding: 1, visibility: 2, texture: { sampleType: 'float' } }, { binding: 2, visibility: 2, sampler: { type: 'filtering' } }, { binding: 3, visibility: 2, texture: { sampleType: 'depth', multisampled: true } }, { binding: 4, visibility: 2, texture: { sampleType: 'unfilterable-float' } }] });
 const bg0 = device.createBindGroup({ layout: g0L, entries: [{ binding: 0, resource: { buffer: fBuf } }, { binding: 1, resource: { buffer: iBuf } }, { binding: 2, resource: sdTex.createView() }] });
 const cmpS = device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' });
 const layScene = device.createPipelineLayout({ bindGroupLayouts: [g0L, g1L] });
@@ -587,9 +589,10 @@ const scenePipes = n => Promise.all([
 ]).then(p => { pipes[n] = p; bundles[n] = null; });
 const bundles = {};
 const n0 = LADDER[level][1];
-const [pSh, pPost] = await Promise.all([
+const [pSh, pPost, pNoise] = await Promise.all([
   device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mObjS, entryPoint: 'vsShadow', buffers: objVB }, primitive: { cullMode: 'none' }, depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2 } }),
   device.createRenderPipelineAsync({ layout: layPost, vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fs', targets: [{ format: fmt }] } }),
+  device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fsNoise', targets: [{ format: 'rgba8unorm' }] } }),
   scenePipes(n0)]);
 const otherMS = () => { if (!ADAPT) return; const n = n0 === 4 ? 2 : 4; if (!(n in pipes)) { pipes[n] = null; scenePipes(n); } };
 
@@ -621,7 +624,7 @@ LOG('bundles ok');
 
 // size / level dependent resources
 let W = 0, H = 0, RW = 0, RH = 0, scale = 1, MS = 0, shSize = 0, waterHi = 1;
-let msC, msA, msD, rC, rA, postBundles, shTex, shView, bg1;
+let msC, msA, msD, rC, rA, postBundles, shTex, shView, bg1, nTex, nView;
 const SPLIT = Q.has('split'), UNCAP = Q.has('uncapped') && OFF;
 const shPass = { colorAttachments: [], depthStencilAttachment: { view: null, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } };
 const mkMain = (load, store) => ({ colorAttachments: [
@@ -657,7 +660,7 @@ function targets() {
     p.colorAttachments[0].view = vC; p.colorAttachments[1].view = vA; p.depthStencilAttachment.view = vD;
     p.colorAttachments[0].resolveTarget = p === objPass ? undefined : vrC; p.colorAttachments[1].resolveTarget = p === objPass ? undefined : vrA;
   }
-  const bgp = device.createBindGroup({ layout: gpL, entries: [{ binding: 0, resource: vrC }, { binding: 1, resource: vrA }, { binding: 2, resource: linS }, { binding: 3, resource: vD }] });
+  const bgp = device.createBindGroup({ layout: gpL, entries: [{ binding: 0, resource: vrC }, { binding: 1, resource: vrA }, { binding: 2, resource: linS }, { binding: 3, resource: vD }, { binding: 4, resource: nView }] });
   const pe = device.createRenderBundleEncoder({ colorFormats: [fmt] });
   pe.setPipeline(pPost); pe.setBindGroup(0, bg0); pe.setBindGroup(1, bgp); pe.draw(3);
   postBundles = [pe.finish()];
@@ -667,6 +670,13 @@ function resize() {
   const w = Q.has('w') ? +Q.get('w') : Math.round(canvas.clientWidth * dpr), h = Q.has('h') ? +Q.get('h') : Math.round(canvas.clientHeight * dpr);
   if (w === W && h === H) return;
   W = canvas.width = w; H = canvas.height = h;
+  // bake the static paper noise for this size (needs the size in the uniform block first)
+  nTex && nTex.destroy();
+  nTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+  nView = nTex.createView();
+  FU[32 + 11 * 4] = W; FU[32 + 11 * 4 + 1] = H; device.queue.writeBuffer(fBuf, 0, FU);
+  const ne = device.createCommandEncoder(), np = ne.beginRenderPass({ colorAttachments: [{ view: nView, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+  np.setPipeline(pNoise); np.setBindGroup(0, bg0); np.draw(3); np.end(); device.queue.submit([ne.finish()]);
   if (OFF) { offTex && offTex.destroy(); offTex = device.createTexture({ size: [W, H], format: fmt, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC }); offView = offTex.createView(); }
   RW = 0; targets();
 }
@@ -778,7 +788,7 @@ const lvlHist = new Uint16Array(LADDER.length);
 if (hasTS) {
   qs = device.createQuerySet({ type: 'timestamp', count: 8 });
   qResolve = device.createBuffer({ size: 64, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-  if (BENCH) qAccum = device.createBuffer({ size: MAXF * 64, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  if (BENCH || GB) qAccum = device.createBuffer({ size: MAXF * 64, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
   shPass.timestampWrites = { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
   mainPass.timestampWrites = { querySet: qs, beginningOfPassWriteIndex: 2, endOfPassWriteIndex: 3 };
   objPass.timestampWrites = mainPass.timestampWrites;
@@ -898,6 +908,13 @@ if (CAPTURE) {
     cam.x = S.x; cam.z = S.z;
     LOG('sim ok');
     frame(1 / 60); LOG('frame submitted'); await show();
+    if (GB) {
+      const N = Q.has('n') ? +Q.get('n') : 600;
+      for (let i = 0; i < 30; i++) { frame(0); await device.queue.onSubmittedWorkDone(); }
+      measuring = true; nf = 0;
+      for (let i = 0; i < N; i++) { frame(0); nf++; if (i & 1) await device.queue.onSubmittedWorkDone(); }
+      measuring = false; await finishBench();
+    }
   }
   window.__ready = true;
 } else {
@@ -935,7 +952,7 @@ if (CAPTURE) {
 async function finishBench() {
   const n = nf;
   const st = a => { const s = Array.from(a).sort((x, y) => x - y); if (!s.length) return null; const avg = s.reduce((x, y) => x + y, 0) / s.length; return { avg: +avg.toFixed(3), p50: +s[Math.floor(s.length * 0.5)].toFixed(3), p99: +s[Math.floor(s.length * 0.99)].toFixed(3), max: +s[s.length - 1].toFixed(3) }; };
-  const iv = ft.subarray(1, n), med = st(iv).p50;
+  const iv = ft.subarray(1, Math.max(n, 3)), med = GB ? 0 : st(iv).p50;
   const budget = Q.has('budget') ? +Q.get('budget') : 11;
   const rep = {
     adapter: { vendor: AI.vendor, architecture: AI.architecture, device: AI.device, description: AI.description },
