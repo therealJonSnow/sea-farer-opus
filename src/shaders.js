@@ -88,7 +88,7 @@ fn shadow(wp: vec3f, n: vec3f) -> f32 {
 // painterly toon light
 fn light(n: vec3f, sh: f32, wp: vec3f) -> vec3f {
   let ndl = dot(n, f.sun.xyz);
-  let l = smoothstep(-0.02, 0.18, ndl) * sh * cloud(wp.xz);
+  let l = smoothstep(-0.1, 0.32, ndl + 0.06 * (vn(wp.xz * 0.7 + wp.y) - 0.5)) * sh * cloud(wp.xz);
   let hi = smoothstep(0.62, 0.8, ndl) * sh;
   let shade = vec3f(0.42, 0.47, 0.72);
   let warm = vec3f(1.06, 1.0, 0.92);
@@ -262,7 +262,14 @@ fn terrainCol(wp: vec3f, n: vec3f) -> vec3f {
   if (!ff) { n = -n; }
   let kind = v.m.x; let part = v.m.y;
   var c = v.c.rgb; var mat = 3.0;
-  if (kind == 0u) { c = terrainCol(v.wp, n); mat = 1.0; }
+  var sea = 0.0;
+  if (kind == 0u) {
+    let ng = normalize(cross(dpdx(v.wp), dpdy(v.wp)));
+    c = terrainCol(v.wp, vec3f(n.x, min(n.y, abs(ng.y) + 0.04), n.z)); mat = 1.0;
+    let sd = shoreD(v.wp.xz); let sw = fwidth(sd);
+    sea = smoothstep(-0.03 - sw, -0.03 + sw, sd);
+    if (sea > 0.5) { mat = 2.0; n = vec3f(0.0, 1.0, 0.0); }
+  }
   else if (kind == 5u) {
     mat = 3.0;
     if (part == 2u) {
@@ -294,6 +301,7 @@ fn terrainCol(wp: vec3f, n: vec3f) -> vec3f {
   else { mat = 7.0; }
   let sh = shadow(v.wp, n);
   var col = lin(c) * light(n, sh, v.wp);
+  col = mix(col, lin(vec3f(0.96, 0.99, 1.0)) * mix(0.85, 1.0, sh), sea);
   // rim of warm light
   col += lin(c) * 0.12 * pow(1.0 - abs(dot(n, f.cf.xyz)), 3.0);
   let fog = smoothstep(f.cf.w * 0.8, f.cf.w, length(v.wp.xz));
@@ -346,11 +354,11 @@ fn creature(p: vec2f, k: i32) -> f32 {
   let a = cr.w + t * 0.045 * select(1.0, -1.0, k == 1);
   let ctr = cr.xy + vec2f(cos(a), sin(a)) * cr.z;
   let fw = normalize(vec2f(-sin(a), cos(a)) * select(1.0, -1.0, k == 1));
-  let sc = select(1.0, 0.8, k == 2);
+  let sc = select(1.0, 0.75, k == 2);
   var q = p - ctr; q = vec2f(dot(q, fw), dot(q, vec2f(-fw.y, fw.x))) / sc;
   if (dot(q, q) > 200.0) { return 0.0; }
   var d: f32;
-  if (k == 2) { // manta
+  if (false) { // (manta removed: read as a smudge)
     let fl = 0.25 * sin(t * 1.3);
     let w = q.x + abs(q.y) * (0.55 + fl * 0.2);
     d = max(abs(q.y) - 5.0 * (1.0 + fl * 0.1) * clamp(1.0 - abs(q.x - 0.3 + abs(q.y) * 0.3) / 2.6, 0.0, 1.0), -999.0);
@@ -389,7 +397,7 @@ fn creature(p: vec2f, k: i32) -> f32 {
   // cat's paws: wind gust patches sliding downwind
   let wq = vec2f(dot(p, wind), dot(p, vec2f(-wind.y, wind.x)));
   let gust = smoothstep(0.55, 0.78, fbm(vec2f(wq.x * 0.05 - t * 0.33, wq.y * 0.11)));
-  c *= 1.0 - 0.13 * gust;
+  c *= 1.0 - 0.06 * gust;
   // toon wave shading
   let ndl = dot(n, f.sun.xyz);
   c *= 0.9 + 0.16 * smoothstep(0.55, 0.75, ndl);
@@ -440,7 +448,7 @@ fn creature(p: vec2f, k: i32) -> f32 {
     }
     if (bdist < 1e3) {
       let spread = 0.7 + bage * 0.55;
-      let fade = exp(-bage * 0.62) * bstr;
+      let fade = exp(-bage * 0.85) * bstr;
       let wob = 0.12 * sin(dot(p, vec2f(1.7, 1.3)) + t * 2.0) + 0.08 * sin(dot(p, vec2f(-2.9, 2.3)) - t * 1.3);
       let wdth = 0.16 * (1.0 - smoothstep(0.0, 4.0, bage)) + 0.06;
       let edgeL = 1.0 - smoothstep(wdth, wdth + 0.12, abs(bdist + wob));
@@ -470,7 +478,10 @@ fn creature(p: vec2f, k: i32) -> f32 {
   col = mix(col, lin(vec3f(0.96, 0.99, 1.0)) * mix(0.85, 1.0, sh), foam);
   let fog = smoothstep(f.cf.w * 0.8, f.cf.w, length(p));
   col = mix(col, vec3f(0.92, 0.95, 0.97), fog);
-  return gout(col, vec3f(0.0, 1.0, 0.0), v.pos.z, 2.0);
+  var o = gout(col, vec3f(0.0, 1.0, 0.0), v.pos.z, 2.0);
+  let cw = fwidth(sd);
+  o.c.a = smoothstep(-0.03 - cw, -0.03 + cw, sd); // alpha-to-coverage: analytic, antialiased coastline
+  return o;
 }
 `;
 
@@ -489,7 +500,7 @@ fn spath(s: f32, L: f32, R: f32, s0: f32) -> vec2f {
   let age = (T() - st.z) / 4.0;
   let head = age * 1.4; let tail = head - 0.45;
   let ss = mix(max(tail, 0.0), min(head, 1.0), s);
-  let L = 14.0 + 6.0 * fract(st.w * 7.0); let R = 0.55 + 0.3 * fract(st.w * 13.0); let s0 = 0.45 + 0.15 * fract(st.w * 3.0);
+  let L = 14.0 + 6.0 * fract(st.w * 7.0); let R = 0.4 + 0.25 * fract(st.w * 13.0); let s0 = 0.45 + 0.15 * fract(st.w * 3.0);
   let q = spath(ss, L, R, s0); let q2 = spath(ss + 0.01, L, R, s0);
   let w3 = vec3f(f.wind.x, 0.0, f.wind.y);
   let side3 = vec3f(-f.wind.y, 0.0, f.wind.x);
@@ -540,13 +551,15 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   for (var k = 0; k < 4; k++) {
     let o = array<vec2i, 4>(vec2i(1, 0), vec2i(0, 1), vec2i(1, 1), vec2i(1, -1))[k];
     let dA = D(ip + o * ir); let dB = D(ip - o * ir);
-    let lap = abs(dA + dB - 2.0 * d0) * dsc / (1.0 + abs(dA - dB) * dsc * 0.25);
-    let ed = smoothstep(0.35, 0.9, lap);
+    let lap = abs(dA + dB - 2.0 * d0) * dsc / (1.0 + abs(dA - dB) * dsc * 0.6);
     let d = vec2f(o) * select(1.0, 0.7071, k > 1) * r * px;
     let aa = A(uv + d); let bb = A(uv - d);
+    let isT = step(abs(a0.w - 0.125), 0.02) * step(abs(aa.w - 0.125), 0.02) * step(abs(bb.w - 0.125), 0.02);
+    let ed = smoothstep(mix(0.35, 1.6, isT), mix(0.9, 3.0, isT), lap);
     let isW = step(abs(a0.w - 0.25), 0.02) * step(abs(aa.w - 0.25), 0.02) * step(abs(bb.w - 0.25), 0.02);
     let nd = length(aa.xy - bb.xy) * 2.0;
-    let en = smoothstep(0.35, 0.75, nd) * (1.0 - isW);
+    let graze = smoothstep(0.82, 0.97, length(a0.xy * 2.0 - 1.0));
+    let en = smoothstep(mix(0.35, 0.8, isT), mix(0.75, 1.15, isT), nd) * (1.0 - isW) * (1.0 - graze);
     let em = smoothstep(0.04, 0.1, abs(aa.w - bb.w));
     e = max(e, max(ed, max(en, em)));
   }

@@ -240,12 +240,13 @@ for (const I of ISL) {
     const x = I.x + Math.cos(a) * r, z = I.z + Math.sin(a) * r, y = islH(I, x, z);
     const gx = islH(I, x + 0.5, z) - islH(I, x - 0.5, z), gz = islH(I, x, z + 0.5) - islH(I, x, z - 0.5);
     if (Math.hypot(gx, gz) > 0.35 || y < 0.4) continue;
-    if (treeSpots.some(t => Math.hypot(t[0] - x, t[2] - z) < 4.6)) continue;
-    treeSpots.push([x, y - 0.1, z, I.type === 0 || y < 1.2 ? 0 : rnd() < 0.15 ? 2 : rnd() < 0.25 ? 0 : 1]);
+    const kind = I.type === 0 || y < 1.2 ? 0 : rnd() < 0.15 ? 2 : rnd() < 0.25 ? 0 : 1, rad = [3.4, 2.4, 2.2][kind];
+    if (treeSpots.some(t => Math.hypot(t[0] - x, t[2] - z) < rad + t[4])) continue;
+    treeSpots.push([x, y - 0.1, z, kind, rad]);
     k++;
   }
 }
-for (const [kind, name] of [[0, 'palm'], [1, 'tree'], [2, 'tree2']]) instances(name, () => { for (const t of treeSpots) if (t[3] === kind) inst.push(t[0], t[1], t[2], 0.8 + rnd() * 0.45, rnd() * 6.28, rnd() * 6.28, 0, 0); });
+for (const [kind, name] of [[0, 'palm'], [1, 'tree'], [2, 'tree2']]) instances(name, () => { for (const t of treeSpots) if (t[3] === kind) inst.push(t[0], t[1], t[2], 0.8 + rnd() * 0.3, rnd() * 6.28, rnd() * 6.28, 0, 0); });
 instances('crab', () => {
   for (const I of ISL) {
     const n = Math.max(1, Math.round(I.R / 5));
@@ -522,7 +523,7 @@ const ms = { count: MSAA };
 const ds = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
 const [pObj, pWat, pStr, pSh, pPost] = await Promise.all([
   device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mObj, entryPoint: 'vs', buffers: objVB }, fragment: { module: mObj, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: ms }),
-  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mWat, entryPoint: 'vs', buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] }, fragment: { module: mWat, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: ms }),
+  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mWat, entryPoint: 'vs', buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] }, fragment: { module: mWat, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: { count: MSAA, alphaToCoverageEnabled: true } }),
   device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mStr, entryPoint: 'vs' }, fragment: { module: mStr, entryPoint: 'fs', targets: [{ format: HDR, blend: { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }, { format: AUX, writeMask: 0 }] }, depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }, multisample: ms }),
   device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mObjS, entryPoint: 'vsShadow', buffers: objVB }, primitive: { cullMode: 'none' }, depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2 } }),
   device.createRenderPipelineAsync({ layout: layPost, vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fs', targets: [{ format: fmt }] } }),
