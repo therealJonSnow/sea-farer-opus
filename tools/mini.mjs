@@ -1,0 +1,11 @@
+import { createRequire } from 'module'; const { chromium } = createRequire(import.meta.url)('playwright');
+import http from 'http'; import fs from 'fs';
+const srv = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end(fs.readFileSync(process.argv[2])); }).listen(0);
+const b = await chromium.launch({ headless: !process.env.HEADED, args: (process.argv[3]||'--enable-unsafe-webgpu').split(' ') });
+const p = await b.newPage();
+p.on('console', m => console.log('console:', m.text()));
+p.on('pageerror', e => console.log('pageerror:', e.message));
+await p.goto(`http://localhost:${srv.address().port}/`);
+await p.waitForTimeout(5000);
+await p.screenshot({path:'/tmp/claude-0/-home-user-sea-farer-opus/76c77cc0-5af5-5985-8caa-ad18da097dd7/scratchpad/min.png'});
+await b.close(); srv.close();
