@@ -591,6 +591,8 @@ function ortho(out, ex, ey, ez, rx, ry, rz, ux, uy, uz, fx, fy, fz, hw, hh, n, f
   out[3] = 0; out[7] = 0; out[11] = 0; out[15] = 1;
 }
 let zoomT = 17;
+let uo = 0;
+function put(a, b, c, d) { FU[uo++] = a; FU[uo++] = b; FU[uo++] = c; FU[uo++] = d; }
 function updateUniforms(dt) {
   const t = S.time;
   // critically damped follow (keeps boat centred, no jitter)
@@ -617,8 +619,7 @@ function updateUniforms(dt) {
   ortho(SM, cxw - sfx * 150, cyw - sfy * 150, czw - sfz * 150, srx, sry, srz, sux, suy, suz, sfx, sfy, sfz, ext, ext, 1, 300);
   // fill uniform block
   FU.set(M, 0); FU.set(SM, 16);
-  let o = 32;
-  const put = (a, b, c, d) => { FU[o++] = a; FU[o++] = b; FU[o++] = c; FU[o++] = d; };
+  uo = 32;
   put(rx, ry, rz, t);
   put(ux, uy, uz, hh * 2 / H);
   put(fx, fy, fz, WORLD_R);
@@ -636,8 +637,8 @@ function updateUniforms(dt) {
   const wsx = Math.sin(S.windA) * rx + Math.cos(S.windA) * rz, wsy = Math.sin(S.windA) * ux + Math.cos(S.windA) * uz;
   const bsx = Math.sin(S.th) * rx + Math.cos(S.th) * rz, bsy = Math.sin(S.th) * ux + Math.cos(S.th) * uz;
   put(S.sheet, Math.atan2(wsx, -wsy), Math.atan2(bsx, -bsy), Math.abs(S.u));
-  FU.set(wake, o); o += 192;
-  FU.set(streak, o);
+  FU.set(wake, uo); uo += 192;
+  FU.set(streak, uo);
   device.queue.writeBuffer(fBuf, 0, FU);
 }
 
