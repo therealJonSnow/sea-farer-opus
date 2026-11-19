@@ -147,7 +147,7 @@ mesh('tree2', () => { // blossom variant
 });
 // crab (kind 3) — faces +z, walks along local x
 mesh('crab', () => {
-  const red = C(0xe0482c), dk = C(0xb8331f);
+  const red = C(0xff6a3d), dk = C(0xe8502e);
   ellipsoid([0, 0.22, 0], [0.42, 0.17, 0.3], red, 3, 0, 12, 7);
   for (const s of [-1, 1]) {
     ellipsoid([s * 0.14, 0.45, 0.2], [0.07, 0.07, 0.07], C(0xffffff), 3, 2, 6, 4);
@@ -240,7 +240,7 @@ for (const I of ISL) {
     const x = I.x + Math.cos(a) * r, z = I.z + Math.sin(a) * r, y = islH(I, x, z);
     const gx = islH(I, x + 0.5, z) - islH(I, x - 0.5, z), gz = islH(I, x, z + 0.5) - islH(I, x, z - 0.5);
     if (Math.hypot(gx, gz) > 0.35 || y < 0.4) continue;
-    if (treeSpots.some(t => Math.hypot(t[0] - x, t[2] - z) < 2.8)) continue;
+    if (treeSpots.some(t => Math.hypot(t[0] - x, t[2] - z) < 4.6)) continue;
     treeSpots.push([x, y - 0.1, z, I.type === 0 || y < 1.2 ? 0 : rnd() < 0.15 ? 2 : rnd() < 0.25 ? 0 : 1]);
     k++;
   }
@@ -278,7 +278,7 @@ function waveH(x, z, t) {
 }
 
 // ---------- simulation state ----------
-const S = { x: 0, z: 0, th: 0.2, u: 0, v: 0, w: 0, rud: 0, sheet: 0.55, boom: 0.6, boomV: 0, heel: 0, pitch: 0, y: 0, fill: 0, flap: 0, anch: 0, ax: 0, az: 0, adrop: 0, pen: 0, windA: WIND0, ws: 7, time: 0 };
+const S = { x: 0, z: 0, th: 2.3, u: 0, v: 0, w: 0, rud: 0, sheet: 0.55, boom: 0.6, boomV: 0, heel: 0, pitch: 0, y: 0, fill: 0, flap: 0, anch: 0, ax: 0, az: 0, adrop: 0, pen: 0, windA: WIND0, ws: 7, time: 0 };
 const keys = { s: 0, d: 0, i: 0, o: 0 };
 const wake = new Float32Array(48 * 4);
 let wakeT = 0;
@@ -686,10 +686,10 @@ function sim(dt) { let r = dt; while (r > 1e-6) { const h = Math.min(r, 1 / 120)
 
 // shot poses for the visual critic: [time, boat x, z, heading, zoom, sheet, anchored]
 const SHOTS = [
-  [6, 0, 0, 0.2, 17, 0.55, 0],
-  [40, -6, 22, -0.9, 16, 0.7, 0],
+  [6, 0, 0, 2.3, 17, 0.55, 0],
+  [40, -6, 22, -0.2, 16, 0.7, 0],
   [80, 14, -2, 2.4, 13, 0.35, 0],
-  [30, -12, -14, 1.5, 30, 0.9, 1],
+  [30, -12, -14, 1.5, 24, 0.9, 1],
   [120, 18, 14, -1.6, 22, 0.2, 0],
   [55, 2, 42, 3.6, 12, 0.8, 0]];
 

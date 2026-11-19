@@ -175,12 +175,11 @@ fn xform(i: VIn) -> X {
     if (part == 1u || part == 2u) {
       let sd = select(-1.0, 1.0, part == 2u);
       let ax = abs(p.x);
-      var ang = (0.55 * sin(flap) * glide + 0.12) * (1.0 - fold) ;
-      ang += fold * 1.25;
+      var ang = mix(0.55 * sin(flap) * glide + 0.12, -0.35, fold);
       let pc = vec2f(ax, p.y);
       let ca = cos(ang); let sa = sin(ang);
       let pr = vec2f(pc.x * ca - pc.y * sa, pc.x * sa + pc.y * ca);
-      p = vec3f(sd * pr.x * mix(1.0, 0.35, fold), pr.y, p.z - fold * ax * 0.5);
+      p = vec3f(sd * (pr.x * mix(1.0, 0.18, fold) + fold * 0.13), pr.y - fold * 0.04, p.z - fold * ax * 0.55);
       let nr = vec2f(abs(n.x) * ca - n.y * sa, abs(n.x) * sa + n.y * ca);
       n = vec3f(sd * nr.x, nr.y, n.z);
     }
@@ -202,9 +201,10 @@ fn xform(i: VIn) -> X {
     let piv = vec3f(0.0, 0.0, -2.02);
     p = ry(p - piv, f.boat2.z * 0.6) + piv; n = ry(n, f.boat2.z * 0.6);
   } else if (part == 4u || part == 5u) {
-    let piv = vec3f(0.0, 0.1, -1.15);
+    p = vec3f(0.0, 0.05, -1.25) + (p - vec3f(0.0, 0.05, -1.15)) * 1.28;
+    let piv = vec3f(0.0, 0.1, -1.25);
     p = rz(p - piv, -f.boat2.x * 0.6 + f.boat2.z * 0.06) + piv;
-    if (part == 5u) { let hp = vec3f(0.0, 1.35, -1.15); p = ry(p - hp, 0.35 * sin(t * 0.4) + f.boat2.z * 0.3) + hp; p.y += 0.02 * sin(t * 3.0); }
+    if (part == 5u) { let hp = vec3f(0.0, 1.71, -1.25); p = ry(p - hp, 0.35 * sin(t * 0.4) + f.boat2.z * 0.3) + hp; p.y += 0.02 * sin(t * 3.0); }
   } else if (part == 6u) {
     let piv = vec3f(0.0, 0.0, 0.56); let d = p - piv; let fl = max(-d.z, 0.0);
     var q = d; q.x += 0.08 * sin(t * 13.0 - fl * 9.0) * fl;
@@ -242,9 +242,10 @@ fn terrainCol(wp: vec3f, n: vec3f) -> vec3f {
   let rock = mix(vec3f(0.74, 0.55, 0.42), vec3f(0.56, 0.40, 0.33), smoothstep(0.3, 0.8, strata));
   var c = mix(wet, sand, smoothstep(0.05, 0.35, y + nz * 0.1));
   let gh = select(1.15, 0.9, isl.n.y > 0.0);
-  let isGrass = smoothstep(1.05, 1.25, y + nz * 0.5) * smoothstep(0.62, 0.72, n.y);
+  let tj = (fbm(wp.xz * 0.21 + vec2f(y * 0.3)) - 0.5) * 0.22;
+  let isGrass = smoothstep(1.05, 1.25, y + nz * 0.5) * smoothstep(0.62 + tj, 0.72 + tj, n.y);
   c = mix(c, grass, isGrass);
-  let isRock = smoothstep(0.62, 0.5, n.y) * smoothstep(0.2, 0.6, y);
+  let isRock = smoothstep(0.62 + tj, 0.5 + tj, n.y) * smoothstep(0.2, 0.6, y);
   c = mix(c, rock, isRock);
   // flowers on grass
   let cell = floor(wp.xz * 1.4); let fp = h22(cell); let dd = length(fract(wp.xz * 1.4) - (0.2 + fp * 0.6));
@@ -368,7 +369,7 @@ fn creature(p: vec2f, k: i32) -> f32 {
     let fin = length((vec2f(q.x - 1.6, abs(q.y) - 1.7)) / vec2f(0.9, 0.35)) - 1.0;
     d = min(d, fin * 0.5);
   }
-  return 1.0 - smoothstep(-0.9, 0.9, d * sc);
+  return 1.0 - smoothstep(-0.35, 0.45, d * sc);
 }
 @fragment fn fs(v: WOut) -> GOut {
   let p = v.wp.xz; let t = T();
@@ -383,8 +384,8 @@ fn creature(p: vec2f, k: i32) -> f32 {
   c = mix(c, vec3f(0.55, 0.88, 0.80), (1.0 - smoothstep(0.0, 2.5, sd)) * 0.6);
   // creatures below
   var dark = 0.0;
-  for (var k = 0; k < 3; k++) { dark = max(dark, creature(p + 0.3 * vec2f(sin(p.y * 0.8 + t), cos(p.x * 0.7 + t)), k)); }
-  c = mix(c, vec3f(0.03, 0.17, 0.38), dark * 0.55 * smoothstep(1.0, 6.0, sd));
+  for (var k = 0; k < 3; k++) { dark = max(dark, creature(p + 0.12 * vec2f(sin(p.y * 0.8 + t), cos(p.x * 0.7 + t)), k)); }
+  c = mix(c, vec3f(0.02, 0.22, 0.52), dark * 0.6 * smoothstep(1.0, 6.0, sd));
   // cat's paws: wind gust patches sliding downwind
   let wq = vec2f(dot(p, wind), dot(p, vec2f(-wind.y, wind.x)));
   let gust = smoothstep(0.55, 0.78, fbm(vec2f(wq.x * 0.05 - t * 0.33, wq.y * 0.11)));
@@ -396,10 +397,10 @@ fn creature(p: vec2f, k: i32) -> f32 {
   let wp2 = p + wind * t * 0.35;
   let warp = vec2f(fbm(wp2 * 0.08), fbm(wp2 * 0.08 + 5.2)) * 3.0;
   let vd = vor((wp2 + warp) * 0.17) / 0.17;
-  let still = smoothstep(0.35, 0.6, fbm(p * 0.018 + vec2f(t * 0.01, 0.0)));
+  let still = smoothstep(0.36, 0.6, fbm(p * 0.03 + vec2f(t * 0.01, 3.0)));
   let lw = 0.085 + 0.06 * fbm(p * 0.5);
   let aa = fwidth(vd) * 1.0;
-  let line = (1.0 - smoothstep(lw - aa, lw + aa, vd)) * mix(0.25, 0.95, still) * (0.6 + 0.4 * smoothstep(0.3, 0.6, vn(p * 0.4 + t * 0.2)));
+  let line = (1.0 - smoothstep(lw - aa, lw + aa, vd)) * mix(0.12, 1.0, still) * (0.45 + 0.55 * smoothstep(0.3, 0.6, vn(p * 0.25 + t * 0.15))) * smoothstep(1.5, 6.0, sd) * (1.0 + 0.3 * gust);
   var foam = line * 0.85;
   // cartoon crest crescents that come and go
   let cs = 14.0;
@@ -439,11 +440,12 @@ fn creature(p: vec2f, k: i32) -> f32 {
     }
     if (bdist < 1e3) {
       let spread = 0.7 + bage * 0.55;
-      let fade = exp(-bage * 0.35) * bstr;
-      let wn = vn(p * 2.2 + vec2f(bage * 2.0));
-      let edgeL = 1.0 - smoothstep(0.1, 0.3, abs(bdist));
-      let core = (1.0 - smoothstep(-spread, -spread * 0.4, bdist)) * 0.5 * smoothstep(0.35, 0.6, wn);
-      wk = max(edgeL * (0.55 + 0.45 * wn), core) * fade;
+      let fade = exp(-bage * 0.62) * bstr;
+      let wob = 0.12 * sin(dot(p, vec2f(1.7, 1.3)) + t * 2.0) + 0.08 * sin(dot(p, vec2f(-2.9, 2.3)) - t * 1.3);
+      let wdth = 0.16 * (1.0 - smoothstep(0.0, 4.0, bage)) + 0.06;
+      let edgeL = 1.0 - smoothstep(wdth, wdth + 0.12, abs(bdist + wob));
+      let core = (1.0 - smoothstep(-spread, -spread * 0.3, bdist)) * 0.35 * (1.0 - smoothstep(0.0, 2.0, bage));
+      wk = max(edgeL, core) * fade;
     }
     // hull foam ring
     let hd = vec2f(sin(f.boat.w), cos(f.boat.w));
@@ -464,7 +466,7 @@ fn creature(p: vec2f, k: i32) -> f32 {
   foam = max(foam, wk);
   let sh = shadow(v.wp, vec3f(0.0, 1.0, 0.0));
   let cl = cloud(p);
-  var col = lin(c) * mix(vec3f(0.62, 0.7, 0.92), vec3f(1.0), sh) * cl;
+  var col = lin(c) * mix(vec3f(0.62, 0.7, 0.92), vec3f(1.0), sh) * mix(vec3f(0.82, 0.88, 1.0), vec3f(1.0), (cl - 0.84) / 0.16);
   col = mix(col, lin(vec3f(0.96, 0.99, 1.0)) * mix(0.85, 1.0, sh), foam);
   let fog = smoothstep(f.cf.w * 0.8, f.cf.w, length(p));
   col = mix(col, vec3f(0.92, 0.95, 0.97), fog);
@@ -487,7 +489,7 @@ fn spath(s: f32, L: f32, R: f32, s0: f32) -> vec2f {
   let age = (T() - st.z) / 4.0;
   let head = age * 1.4; let tail = head - 0.45;
   let ss = mix(max(tail, 0.0), min(head, 1.0), s);
-  let L = 14.0 + 6.0 * fract(st.w * 7.0); let R = 0.9 + 0.5 * fract(st.w * 13.0); let s0 = 0.4 + 0.3 * fract(st.w * 3.0);
+  let L = 14.0 + 6.0 * fract(st.w * 7.0); let R = 0.55 + 0.3 * fract(st.w * 13.0); let s0 = 0.45 + 0.15 * fract(st.w * 3.0);
   let q = spath(ss, L, R, s0); let q2 = spath(ss + 0.01, L, R, s0);
   let w3 = vec3f(f.wind.x, 0.0, f.wind.y);
   let side3 = vec3f(-f.wind.y, 0.0, f.wind.x);
@@ -537,7 +539,8 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   let dsc = 1.0 / (f.cu.w * 12.0);
   for (var k = 0; k < 4; k++) {
     let o = array<vec2i, 4>(vec2i(1, 0), vec2i(0, 1), vec2i(1, 1), vec2i(1, -1))[k];
-    let lap = abs(D(ip + o * ir) + D(ip - o * ir) - 2.0 * d0) * dsc;
+    let dA = D(ip + o * ir); let dB = D(ip - o * ir);
+    let lap = abs(dA + dB - 2.0 * d0) * dsc / (1.0 + abs(dA - dB) * dsc * 0.25);
     let ed = smoothstep(0.35, 0.9, lap);
     let d = vec2f(o) * select(1.0, 0.7071, k > 1) * r * px;
     let aa = A(uv + d); let bb = A(uv - d);
@@ -558,9 +561,10 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   var c = c0;
   let pool = clamp(length(c - m) * 2.2, 0.0, 1.0);
   // paper + pigment density
-  let paper = vn(fp * 0.9) * 0.5 + vn(fp * 2.1) * 0.3 + vn(vec2f(fp.x * 0.25, fp.y * 3.0)) * 0.2;
+  let paper = vn(fp * 0.9) * 0.45 + vn(fp * 2.3) * 0.3 + vn(vec2f(fp.x * 0.22, fp.y * 2.6)) * 0.25;
+  let gran = vn(fp * 0.45 + vec2f(13.0)) ;
   let turb = fbm(fp * 0.006);
-  let dens = 1.0 + 0.22 * (paper - 0.5) + 0.25 * (turb - 0.5) + 0.55 * pool;
+  let dens = 1.0 + 0.34 * (paper - 0.5) + 0.42 * (turb - 0.5) + 0.18 * (gran - 0.5) + 0.7 * pool;
   // darken toward denser pigment (Bousseau-style)
   c = c - (c - c * c) * (dens - 1.0) * 1.4;
   c = clamp(c, vec3f(0.0), vec3f(1.0));
@@ -581,6 +585,7 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   let hp = (fp - hc);
   let hr = length(hp);
   let ha = fwidth(hr) * 1.2;
+  g *= 1.0 - 0.25 * (1.0 - smoothstep(56.0, 72.0, length(hp - vec2f(3.0, 4.0))));
   let disc = 1.0 - smoothstep(58.0 - ha, 58.0 + ha, hr);
   g = mix(g, vec3f(0.98, 0.95, 0.87), disc * 0.85);
   let ring = 1.0 - smoothstep(1.8 - ha, 1.8 + ha, abs(hr - 58.0));
