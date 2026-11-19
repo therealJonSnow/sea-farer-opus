@@ -1,0 +1,35 @@
+{
+ "frames": 20000,
+ "sampledBytes": 1223380,
+ "bytesPerFrame": 61.17,
+ "byFunction": [
+  [
+   "D0",
+   1214520
+  ],
+  [
+   "F0",
+   5268
+  ],
+  [
+   "(IDLE_EXTERNAL)",
+   1488
+  ],
+  [
+   "(V8 API)",
+   1068
+  ],
+  [
+   "evaluate",
+   632
+  ],
+  [
+   "(BYTECODE_COMPILER)",
+   240
+  ],
+  [
+   "(anon)",
+   164
+  ]
+ ]
+}
