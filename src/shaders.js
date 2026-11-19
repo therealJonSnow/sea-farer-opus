@@ -17,6 +17,9 @@ struct F {
   scr: vec4f,  // w,h,1/w,1/h
   tgt: vec4f,  // cam target xz, grid origin xz
   hud: vec4f,  // sheet, wind screen angle, heading screen angle, speed
+  rs: vec4f,   // scene render size w,h, render scale, 1/shadow map size
+  q: vec4f,    // x: water detail (1 = full)
+  wbox: array<vec4f, 6>, // wake segment group boxes (xz min, xz max)
   wake: array<vec4f, 48>,
   streak: array<vec4f, 24>,
 };
@@ -51,16 +54,15 @@ fn islR(i: u32, th: f32) -> f32 {
   let a = isl.a[i]; let b = isl.b[i]; let c = isl.c[i];
   return a.z * (1.0 + b.x * sin(2.0 * th + b.y) + b.z * sin(3.0 * th + b.w) + c.x * sin(5.0 * th + c.y));
 }
-// signed distance-ish to nearest coastline (negative = inside island)
+// signed distance-ish to nearest coastline (negative = inside island). A 2-unit grid baked at init stores which island
+// is nearest (255 = more than 40 units from any coast), so only that one island is evaluated per pixel / vertex.
+@group(0) @binding(2) var sdTex: texture_2d<u32>;
 fn shoreD(p: vec2f) -> f32 {
-  var m = 1e4;
-  let n = u32(isl.n.x);
-  for (var i = 0u; i < n; i++) {
-    let a = isl.a[i]; let v = p - a.xy; let d = length(v);
-    if (d - a.z * 1.3 > m) { continue; }
-    m = min(m, d - islR(i, atan2(v.y, v.x)));
-  }
-  return m;
+  let t = vec2i(clamp(floor(p * 0.5 + 360.0), vec2f(0.0), vec2f(719.0)));
+  let i = textureLoad(sdTex, t, 0).r;
+  if (i == 255u) { return 40.0; }
+  let v = p - isl.a[i].xy;
+  return min(length(v) - islR(i, atan2(v.y, v.x)), 40.0);
 }
 fn cloud(p: vec2f) -> f32 {
   let q = p * 0.011 - f.wind.xy * T() * 0.018;
@@ -78,7 +80,7 @@ fn shadow(wp: vec3f, n: vec3f) -> f32 {
   let uv = vec2f(s.x * 0.5 + 0.5, 0.5 - s.y * 0.5);
   if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return 1.0; }
   let z = s.z - 0.0015;
-  let px = 1.0 / 2048.0;
+  let px = f.rs.w;
   var a = 0.0;
   for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
     a += textureSampleCompareLevel(shTex, shSmp, uv + vec2f(f32(i), f32(j)) * px * 1.25, z);
@@ -311,37 +313,46 @@ fn terrainCol(wp: vec3f, n: vec3f) -> vec3f {
 `;
 
 export const WATER = /* wgsl */`
-struct WOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) g: vec2f, @location(2) sd: f32 };
+struct WOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) g: vec2f, @location(2) sd: f32, @location(3) n: vec3f, @location(4) lo: vec3f };
+// gradient of the undamped wave height at p
+fn wgrad(p: vec2f) -> vec2f {
+  var g = vec2f(0.0);
+  for (var i = 0; i < 4; i++) {
+    let L = array<f32,4>(24.0, 13.0, 8.5, 33.0)[i]; let A = array<f32,4>(0.24, 0.12, 0.07, 0.2)[i];
+    let k = 2.0 * PI / L; let w = sqrt(9.8 * k) * 0.55; let d = waveDir(i);
+    g += A * k * d * cos(k * dot(d, p) - w * T());
+  }
+  return g;
+}
 @vertex fn vs(@location(0) g: vec2f) -> WOut {
   let base = g + f.tgt.zw;
   let sd = shoreD(base);
   let damp = 0.35 + 0.65 * smoothstep(0.0, 14.0, sd);
   let p = gerst(base, damp);
-  var o: WOut; o.pos = f.vp * vec4f(p, 1.0); o.wp = p; o.g = base; o.sd = sd;
+  let wg = wgrad(base);
+  var o: WOut; o.pos = f.vp * vec4f(p, 1.0); o.wp = p; o.g = base; o.sd = sd; o.n = vec3f(-wg.x, 1.0, -wg.y);
+  // very low-frequency fields (features of 4+ units vs a 1.25-unit grid) are evaluated per vertex
+  o.lo = vec3f(fbm(p.xz * 0.03 + vec2f(3.0, 1.0)), fbm(p.xz * 0.03 + vec2f(T() * 0.01, 3.0)), cloud(p.xz));
   return o;
 }
-fn wnorm(p: vec2f) -> vec3f {
-  let e = 0.25;
-  let a = gerst(p, 1.0).y; let b = gerst(p + vec2f(e, 0.0), 1.0).y; let c = gerst(p + vec2f(0.0, e), 1.0).y;
-  return normalize(vec3f(a - b, e, a - c));
-}
-// voronoi border distance (iq)
+// voronoi border distance (iq). The 9 animated feature points around the pixel's cell are computed once and reused
+// by the border pass (3x3 around the pixel's cell instead of 5x5 around the nearest one: no new hashes or sines).
 fn vor(x: vec2f) -> f32 {
   let n = floor(x); let fr = fract(x);
-  var mg: vec2f; var mr: vec2f; var md = 8.0;
-  for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
-    let g = vec2f(f32(i), f32(j));
+  var pts: array<vec2f, 9>;
+  var mr: vec2f; var md = 8.0;
+  for (var k = 0; k < 9; k++) {
+    let g = vec2f(f32(k % 3 - 1), f32(k / 3 - 1));
     var o = h22(n + g); o = 0.5 + 0.38 * sin(T() * 0.35 + 6.2831 * o);
-    let r = g + o - fr; let d = dot(r, r);
-    if (d < md) { md = d; mr = r; mg = g; }
-  } }
+    let r = g + o - fr; pts[k] = r;
+    let d = dot(r, r);
+    if (d < md) { md = d; mr = r; }
+  }
   md = 8.0;
-  for (var j = -2; j <= 2; j++) { for (var i = -2; i <= 2; i++) {
-    let g = mg + vec2f(f32(i), f32(j));
-    var o = h22(n + g); o = 0.5 + 0.38 * sin(T() * 0.35 + 6.2831 * o);
-    let r = g + o - fr;
+  for (var k = 0; k < 9; k++) {
+    let r = pts[k];
     if (dot(mr - r, mr - r) > 0.00001) { md = min(md, dot(0.5 * (mr + r), normalize(r - mr))); }
-  } }
+  }
   return md;
 }
 fn segD(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
@@ -386,10 +397,10 @@ fn creature(p: vec2f, k: i32) -> vec2f {
 @fragment fn fs(v: WOut) -> GOut {
   let p = v.wp.xz; let t = T();
   let sd = shoreD(v.g);
-  let n = normalize(mix(wnorm(v.g), vec3f(0.0, 1.0, 0.0), 0.35));
+  let n = normalize(mix(normalize(v.n), vec3f(0.0, 1.0, 0.0), 0.35));
   let wind = f.wind.xy;
   // base pigment: deep -> mid -> shallow lagoon
-  let lf = fbm(p * 0.03 + vec2f(3.0, 1.0));
+  let lf = v.lo.x;
   var c = mix(vec3f(0.07, 0.42, 0.78), vec3f(0.12, 0.56, 0.86), smoothstep(0.3, 0.7, lf));
   let shallow = 1.0 - smoothstep(0.5, 11.0, sd);
   c = mix(c, vec3f(0.24, 0.80, 0.82), shallow * 0.9);
@@ -412,9 +423,10 @@ fn creature(p: vec2f, k: i32) -> vec2f {
   let wp2 = p + wind * t * 0.35;
   let warp = vec2f(fbm(wp2 * 0.08), fbm(wp2 * 0.08 + 5.2)) * 3.0;
   let vd = vor((wp2 + warp) * 0.17) / 0.17;
-  let still = smoothstep(0.36, 0.6, fbm(p * 0.03 + vec2f(t * 0.01, 3.0)));
-  let lw = 0.085 + 0.06 * fbm(p * 0.5);
+  let still = smoothstep(0.36, 0.6, v.lo.y);
   let aa = fwidth(vd) * 1.0;
+  var lw = 0.0; // line width noise only matters next to a cell border
+  if (vd < 0.145 + aa) { lw = 0.085 + 0.06 * fbm(p * 0.5); }
   let line = (1.0 - smoothstep(lw - aa, lw + aa, vd)) * mix(0.12, 1.0, still) * (0.45 + 0.55 * smoothstep(0.3, 0.6, vn(p * 0.25 + t * 0.15))) * smoothstep(1.5, 6.0, sd) * (1.0 + 0.3 * gust);
   var foam = line * 0.85;
   // cartoon crest crescents that come and go
@@ -431,9 +443,12 @@ fn creature(p: vec2f, k: i32) -> vec2f {
   foam = max(foam, (1.0 - smoothstep(-caa, caa, arc)) * arcm * life * step(0.45, ch.y) * smoothstep(1.0, 8.0, sd));
   // shoreline foam + lapping rings
   let sa = fwidth(sd) * 1.0;
-  let lap = fract(t * 0.22 + fbm(p * 0.2) * 0.4);
-  let ringD = 0.25 + lap * 3.2;
-  let ring = (1.0 - smoothstep(0.14 - sa, 0.14 + sa, abs(sd - ringD))) * (1.0 - lap);
+  var ring = 0.0;
+  if (sd < 3.6 + sa) { // lapping rings never reach further out than this
+    let lap = fract(t * 0.22 + fbm(p * 0.2) * 0.4);
+    let ringD = 0.25 + lap * 3.2;
+    ring = (1.0 - smoothstep(0.14 - sa, 0.14 + sa, abs(sd - ringD))) * (1.0 - lap);
+  }
   let edge = 1.0 - smoothstep(0.35 - sa, 0.35 + sa, sd + 0.15 * sin(p.x * 1.3 + t * 1.5) * sin(p.y * 1.1));
   foam = max(foam, max(edge, ring * 0.9));
   // wake: V trail from the boat history
@@ -443,6 +458,7 @@ fn creature(p: vec2f, k: i32) -> vec2f {
   if (bd < 70.0) {
     var bdist = 1e4; var bage = 0.0; var bstr = 0.0;
     for (var i = 0; i < 47; i++) {
+      if ((i & 7) == 0) { let bx = f.wbox[i >> 3]; if (any(p < bx.xy) || any(p > bx.zw)) { i += 7; continue; } }
       let a = f.wake[i]; let b = f.wake[i + 1];
       if (a.w <= 0.0 || b.w <= 0.0) { continue; }
       let ba = b.xy - a.xy; let hh = dot(p - a.xy, ba) / max(dot(ba, ba), 1e-5);
@@ -480,7 +496,7 @@ fn creature(p: vec2f, k: i32) -> vec2f {
   }
   foam = max(foam, wk);
   let sh = shadow(v.wp, vec3f(0.0, 1.0, 0.0));
-  let cl = cloud(p);
+  let cl = v.lo.z;
   var col = lin(c) * mix(vec3f(0.62, 0.7, 0.92), vec3f(1.0), sh) * mix(vec3f(0.82, 0.88, 1.0), vec3f(1.0), (cl - 0.84) / 0.16);
   col = mix(col, lin(vec3f(0.96, 0.99, 1.0)) * mix(0.85, 1.0, sh), foam);
   let fog = smoothstep(f.cf.w * 0.8, f.cf.w, length(p));
@@ -532,7 +548,7 @@ export const POST = /* wgsl */`
 @group(1) @binding(1) var aTex: texture_2d<f32>;
 @group(1) @binding(2) var ls: sampler;
 @group(1) @binding(3) var dTex: texture_depth_multisampled_2d;
-fn D(p: vec2i) -> f32 { return textureLoad(dTex, clamp(p, vec2i(0), vec2i(f.scr.xy) - 1), 0) * 449.0; }
+fn D(p: vec2i) -> f32 { return textureLoad(dTex, clamp(p, vec2i(0), vec2i(f.rs.xy) - 1), 0) * 449.0; }
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
   let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
   return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
@@ -549,8 +565,8 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   let c0 = textureSampleLevel(cTex, ls, uv, 0.0).rgb;
   let a0 = A(uv);
   // ink lines: depth laplacian (exact MSAA depth) + normal + material discontinuities
-  let ip = vec2i(floor(fc.xy + wob * 2.2 * s));
-  let ir = max(1, i32(round(1.25 * s)));
+  let ip = vec2i(floor(uv * f.rs.xy));
+  let ir = max(1, i32(round(1.25 * s * f.rs.z)));
   let d0 = D(ip);
   let r = (1.1 + 0.5 * vn(fp * 0.05)) * s;
   var e = 0.0;

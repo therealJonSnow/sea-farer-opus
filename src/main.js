@@ -111,13 +111,11 @@ const meshes = {};
 function mesh(name, fn) { const i0 = IB.length, v0 = vcount; fn(); meshes[name] = { first: i0, count: IB.length - i0 }; }
 
 // terrain
-mesh('terrain', () => {
-  for (const I of ISL) {
-    const ext = I.R * 1.42, N = Math.round(clamp(I.R * 5.5, 60, 220));
-    const H = (x, z) => islH(I, x, z);
-    surf((u, v) => { const x = I.x - ext + u * 2 * ext, z = I.z - ext + v * 2 * ext; return [x, H(x, z), z]; }, N, N, [1, 1, 1, 0], 0, 0);
-  }
-});
+ISL.forEach((I, i) => mesh('terrain' + i, () => {
+  const ext = I.R * 1.42, N = Math.round(clamp(I.R * 5.5, 60, 220));
+  const H = (x, z) => islH(I, x, z);
+  surf((u, v) => { const x = I.x - ext + u * 2 * ext, z = I.z - ext + v * 2 * ext; return [x, H(x, z), z]; }, N, N, [1, 1, 1, 0], 0, 0);
+}));
 // fix terrain normals analytically (surf uses param derivs; good enough) -- flip check
 // palm tree (kind 1)
 mesh('palm', () => {
@@ -246,13 +244,14 @@ for (const I of ISL) {
     if (len2(gx, gz) > 0.35 || y < 0.4) continue;
     const kind = I.type === 0 || y < 1.2 ? 0 : rnd() < 0.15 ? 2 : rnd() < 0.25 ? 0 : 1, rad = [3.4, 2.4, 2.2][kind];
     if (treeSpots.some(t => len2(t[0] - x, t[2] - z) < rad + t[4])) continue;
-    treeSpots.push([x, y - 0.1, z, kind, rad]);
+    treeSpots.push([x, y - 0.1, z, kind, rad, ISL.indexOf(I)]);
     k++;
   }
 }
-for (const [kind, name] of [[0, 'palm'], [1, 'tree'], [2, 'tree2']]) instances(name, () => { for (const t of treeSpots) if (t[3] === kind) inst.push(t[0], t[1], t[2], 0.8 + rnd() * 0.3, rnd() * 6.28, rnd() * 6.28, 0, 0); });
-instances('crab', () => {
-  for (const I of ISL) {
+// per-island instance ranges so off-screen islands can be culled (rnd() order unchanged)
+for (const [kind, name] of [[0, 'palm'], [1, 'tree'], [2, 'tree2']]) ISL.forEach((I, i) => instances(name + i, () => { for (const t of treeSpots) if (t[3] === kind && t[5] === i) inst.push(t[0], t[1], t[2], 0.8 + rnd() * 0.3, rnd() * 6.28, rnd() * 6.28, 0, 0); }));
+ISL.forEach((I, i) => instances('crab' + i, () => {
+  {
     const n = Math.max(1, Math.round(I.R / 5));
     for (let k = 0; k < n; k++) {
       const a = rnd() * 6.283, q = I.type === 0 ? 0.7 + rnd() * 0.2 : 0.9 + rnd() * 0.04, r = islR(I, a) * q;
@@ -260,7 +259,7 @@ instances('crab', () => {
       inst.push(x, Math.max(islH(I, x, z), 0.05), z, 0.75 + rnd() * 0.3, -a, rnd() * 6.28, 0.6 + rnd() * 0.8, 0.6 + rnd() * 0.9);
     }
   }
-});
+}));
 instances('gull', () => {
   inst.push(0, 0, 0, 1, 0, 0, 0, -1); // mast gull
   for (let k = 0; k < 3; k++) inst.push(0, 7 + k * 2.2, 0, 1, 0, k * 2.09 + 0.4, 8 + k * 4, 1); // follow boat
@@ -465,14 +464,34 @@ const canvas = document.querySelector('canvas');
 const err = m => { document.getElementById('msg').textContent = m; throw new Error(m); };
 const adapter = navigator.gpu && await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
 if (!adapter) err('WebGPU is not available in this browser.');
+const AI = adapter.info || {};
 const hasTS = adapter.features.has('timestamp-query');
 const device = await adapter.requestDevice({ requiredFeatures: hasTS ? ['timestamp-query'] : [] });
-// OFF: render offscreen + read back into a 2D canvas (used for headless capture where presentation is unavailable)
+// OFF: render offscreen + read back into a 2D canvas (deterministic capture; also the old GPU-less container workaround)
 const OFF = CAPTURE || Q.has('offscreen');
 const ctx = canvas.getContext(OFF ? '2d' : 'webgpu');
 const fmt = OFF ? 'rgba8unorm' : navigator.gpu.getPreferredCanvasFormat();
 if (!OFF) ctx.configure({ device, format: fmt, alphaMode: 'opaque' });
-let offTex, offView, offBuf;
+let offTex, offView;
+
+// ---------- quality ladder ----------
+// [max scene megapixels (0 = native), MSAA samples, shadow map size, water detail (1 = full)]
+// Post + HUD always run at native resolution; only the 3D scene is scaled.
+const LADDER = [
+  [0.6, 2, 1024, 0],
+  [1.0, 2, 1024, 0],
+  [1.5, 2, 1024, 0],
+  [2.1, 2, 1024, 1],
+  [2.8, 2, 2048, 1],
+  [2.8, 4, 2048, 1],
+  [3.7, 4, 2048, 1],
+  [0, 4, 2048, 1]];
+const TOP = LADDER.length - 1;
+const vendor = (AI.vendor || '').toLowerCase();
+// conservative start: discrete GPUs at the top, Apple one below, everything else (integrated, mobile, unknown) at 1080p-class / MSAA 2x
+const L0 = AI.isFallbackAdapter ? 0 : /nvidia|amd|ati/.test(vendor) ? TOP : vendor === 'apple' ? TOP - 1 : 3;
+let level = Q.has('q') ? clamp(+Q.get('q'), 0, TOP) : (BENCH || CAPTURE) && !Q.has('adaptive') ? TOP : L0;
+const ADAPT = !Q.has('q') && (Q.has('adaptive') || !(BENCH || CAPTURE));
 
 const buf = (data, usage) => { const b = device.createBuffer({ size: (data.byteLength + 3) & ~3, usage: usage | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, data); return b; };
 // pack vertices: pos f32x3, normal snorm8x4, color unorm8x4, meta uint8x4 (24 bytes)
@@ -495,8 +514,24 @@ const wi = new Uint32Array(WG * WG * 6);
 for (let j = 0, k = 0; j < WG; j++) for (let i = 0; i < WG; i++) { const a = j * (WG + 1) + i; wi.set([a, a + WG + 1, a + 1, a + 1, a + WG + 1, a + WG + 2], k); k += 6; }
 const wvBuf = buf(wv, GPUBufferUsage.VERTEX), wiBuf = buf(wi, GPUBufferUsage.INDEX);
 
-// uniforms
-const FU = new Float32Array(16 * 2 + 4 * 14 + 48 * 4 + 24 * 4);
+// per-island draws go through indirect args so culling is a tiny buffer write while the bundles stay static
+const DR = []; // [mesh, instRange, island, castsShadow]
+ISL.forEach((I, i) => {
+  DR.push(['terrain' + i, instRanges.one, i, 1]);
+  for (const n of ['palm', 'tree', 'tree2']) if (instRanges[n + i].count) DR.push([n, instRanges[n + i], i, 1]);
+  if (instRanges['crab' + i].count) DR.push(['crab', instRanges['crab' + i], i, 0]);
+});
+const indMain = new Uint32Array(DR.length * 5), indSh = new Uint32Array(DR.length * 5);
+// firstInstance stays 0 (non-zero needs 'indirect-first-instance'); the instance buffer is bound at an offset instead
+DR.forEach(([m, r], k) => { indMain.set([meshes[m].count, r.count, meshes[m].first, 0, 0], k * 5); indSh.set(indMain.subarray(k * 5, k * 5 + 5), k * 5); });
+const indMainBuf = buf(indMain, GPUBufferUsage.INDIRECT), indShBuf = buf(indSh, GPUBufferUsage.INDIRECT);
+// island bounding spheres (x, y, z, r)
+const IBS = new Float32Array(ISL.length * 4);
+ISL.forEach((I, i) => IBS.set([I.x, I.H * 0.5, I.z, I.R * 1.42 * 1.415 + I.H * 0.5 + 7], i * 4));
+const NOCULL = Q.has('nocull');
+
+// uniforms: 2 mat4 + 16 vec4 + wake boxes (6) + wake (48) + streaks (24)
+const FU = new Float32Array(16 * 2 + 4 * 16 + 6 * 4 + 48 * 4 + 24 * 4);
 const fBuf = device.createBuffer({ size: FU.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 const IU = new Float32Array(24 * 4 * 3 + 4 * 4 + 4);
 ISL.forEach((I, i) => { IU.set([I.x, I.z, I.R, I.H], i * 4); IU.set([I.a1, I.p1, I.a2, I.p2], 96 + i * 4); IU.set([I.a3, I.p3, I.type, 0], 192 + i * 4); });
@@ -504,16 +539,26 @@ CRE.forEach((c, i) => IU.set(c, 288 + i * 4));
 IU[304] = ISL.length;
 const iBuf = buf(IU, GPUBufferUsage.UNIFORM);
 
-const shTex = device.createTexture({ size: [SHADOW, SHADOW], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
-const shView = shTex.createView();
+// nearest-island grid for shoreD(): 720x720 texels of 2 world units over [-720, 720]; 255 = > 40 units from any coast
+const SDN = 720, sdIdx = new Uint8Array(SDN * SDN).fill(255), sdBest = new Float32Array(SDN * SDN).fill(40);
+ISL.forEach((I, k) => {
+  const r = I.R * 1.3 + 42, i0 = Math.max(0, Math.floor((I.x - r) / 2 + 360)), i1 = Math.min(SDN - 1, Math.ceil((I.x + r) / 2 + 360));
+  const j0 = Math.max(0, Math.floor((I.z - r) / 2 + 360)), j1 = Math.min(SDN - 1, Math.ceil((I.z + r) / 2 + 360));
+  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+    const x = (i + 0.5 - 360) * 2, z = (j + 0.5 - 360) * 2, d = len2(x - I.x, z - I.z) - islR(I, Math.atan2(z - I.z, x - I.x));
+    if (d < sdBest[j * SDN + i]) { sdBest[j * SDN + i] = d; sdIdx[j * SDN + i] = k; }
+  }
+});
+const sdTex = device.createTexture({ size: [SDN, SDN], format: 'r8uint', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+device.queue.writeTexture({ texture: sdTex }, sdIdx, { bytesPerRow: SDN }, [SDN, SDN]);
 const g0L = device.createBindGroupLayout({ entries: [
-  { binding: 0, visibility: 3, buffer: {} }, { binding: 1, visibility: 3, buffer: {} }] });
+  { binding: 0, visibility: 3, buffer: {} }, { binding: 1, visibility: 3, buffer: {} }, { binding: 2, visibility: 3, texture: { sampleType: 'uint' } }] });
 const g1L = device.createBindGroupLayout({ entries: [
   { binding: 0, visibility: 2, texture: { sampleType: 'depth' } }, { binding: 1, visibility: 2, sampler: { type: 'comparison' } }] });
 const gpL = device.createBindGroupLayout({ entries: [
   { binding: 0, visibility: 2, texture: { sampleType: 'float' } }, { binding: 1, visibility: 2, texture: { sampleType: 'float' } }, { binding: 2, visibility: 2, sampler: { type: 'filtering' } }, { binding: 3, visibility: 2, texture: { sampleType: 'depth', multisampled: true } }] });
-const bg0 = device.createBindGroup({ layout: g0L, entries: [{ binding: 0, resource: { buffer: fBuf } }, { binding: 1, resource: { buffer: iBuf } }] });
-const bg1 = device.createBindGroup({ layout: g1L, entries: [{ binding: 0, resource: shView }, { binding: 1, resource: device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' }) }] });
+const bg0 = device.createBindGroup({ layout: g0L, entries: [{ binding: 0, resource: { buffer: fBuf } }, { binding: 1, resource: { buffer: iBuf } }, { binding: 2, resource: sdTex.createView() }] });
+const cmpS = device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' });
 const layScene = device.createPipelineLayout({ bindGroupLayouts: [g0L, g1L] });
 const layShadow = device.createPipelineLayout({ bindGroupLayouts: [g0L] });
 const layPost = device.createPipelineLayout({ bindGroupLayouts: [g0L, gpL] });
@@ -532,65 +577,98 @@ const objVB = [
 const HDR = 'rgba16float';
 const AUX = 'rgba8unorm';
 const tgts = [{ format: HDR }, { format: AUX }];
-const ms = { count: MSAA };
 const ds = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
-const [pObj, pWat, pStr, pSh, pPost] = await Promise.all([
-  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mObj, entryPoint: 'vs', buffers: objVB }, fragment: { module: mObj, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: ms }),
-  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mWat, entryPoint: 'vs', buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] }, fragment: { module: mWat, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: { count: MSAA, alphaToCoverageEnabled: true } }),
-  device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mStr, entryPoint: 'vs' }, fragment: { module: mStr, entryPoint: 'fs', targets: [{ format: HDR, blend: { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }, { format: AUX, writeMask: 0 }] }, depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }, multisample: ms }),
+// scene pipelines per MSAA count; the set for the starting level is built up front, the other one in the background
+const pipes = {};
+const scenePipes = n => Promise.all([
+  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mObj, entryPoint: 'vs', buffers: objVB }, fragment: { module: mObj, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: { count: n } }),
+  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mWat, entryPoint: 'vs', buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] }, fragment: { module: mWat, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: { count: n, alphaToCoverageEnabled: true } }),
+  device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mStr, entryPoint: 'vs' }, fragment: { module: mStr, entryPoint: 'fs', targets: [{ format: HDR, blend: { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }, { format: AUX, writeMask: 0 }] }, depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }, multisample: { count: n } }),
+]).then(p => { pipes[n] = p; bundles[n] = null; });
+const bundles = {};
+const n0 = LADDER[level][1];
+const [pSh, pPost] = await Promise.all([
   device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mObjS, entryPoint: 'vsShadow', buffers: objVB }, primitive: { cullMode: 'none' }, depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2 } }),
   device.createRenderPipelineAsync({ layout: layPost, vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fs', targets: [{ format: fmt }] } }),
-]);
+  scenePipes(n0)]);
+const otherMS = () => { if (!ADAPT) return; const n = n0 === 4 ? 2 : 4; if (!(n in pipes)) { pipes[n] = null; scenePipes(n); } };
 
 LOG('pipelines ok');
-// render bundles: everything dynamic lives in uniforms, so command lists are static
+// render bundles: everything dynamic lives in uniforms / indirect args, so command lists are static
 function drawObjs(e, shadowPass) {
   e.setBindGroup(0, bg0);
   if (!shadowPass) e.setBindGroup(1, bg1);
   e.setVertexBuffer(0, vbuf); e.setVertexBuffer(1, instBuf); e.setIndexBuffer(ibuf, 'uint32');
   const d = (m, r) => { if (r.count) e.drawIndexed(meshes[m].count, r.count, meshes[m].first, 0, r.first); };
-  d('terrain', instRanges.one); d('boat', instRanges.one);
-  d('palm', instRanges.palm); d('tree', instRanges.tree); d('tree2', instRanges.tree2);
-  d('gull', instRanges.gull);
-  if (!shadowPass) d('crab', instRanges.crab);
+  d('boat', instRanges.one); d('gull', instRanges.gull);
+  DR.forEach((r, k) => { if (!shadowPass || r[3]) { e.setVertexBuffer(1, instBuf, r[1].first * 32); e.drawIndexedIndirect(shadowPass ? indShBuf : indMainBuf, k * 20); } });
 }
 const shBundleE = device.createRenderBundleEncoder({ colorFormats: [], depthStencilFormat: 'depth32float' });
 shBundleE.setPipeline(pSh); drawObjs(shBundleE, true);
 const shBundles = [shBundleE.finish()];
-const mainE = device.createRenderBundleEncoder({ colorFormats: [HDR, AUX], depthStencilFormat: 'depth24plus', sampleCount: MSAA });
-if (!Q.has('noobj')) { mainE.setPipeline(pObj); drawObjs(mainE, false); }
-if (!Q.has('nowat')) { mainE.setPipeline(pWat); mainE.setBindGroup(0, bg0); mainE.setBindGroup(1, bg1); mainE.setVertexBuffer(0, wvBuf); mainE.setIndexBuffer(wiBuf, 'uint32'); mainE.drawIndexed(wi.length); }
-if (!Q.has('nostr')) { mainE.setPipeline(pStr); mainE.setBindGroup(0, bg0); mainE.draw(48 * 6, 24); }
-const mainBundles = [mainE.finish()];
+// main pass = objects bundle + water/streak bundle (split into two passes with &split to time water separately)
+function recordMain(n) {
+  const [pObj, pWat, pStr] = pipes[n];
+  const enc = () => device.createRenderBundleEncoder({ colorFormats: [HDR, AUX], depthStencilFormat: 'depth24plus', sampleCount: n });
+  const eo = enc(), ew = enc();
+  if (!Q.has('noobj')) { eo.setPipeline(pObj); drawObjs(eo, false); }
+  if (!Q.has('nowat')) { ew.setPipeline(pWat); ew.setBindGroup(0, bg0); ew.setBindGroup(1, bg1); ew.setVertexBuffer(0, wvBuf); ew.setIndexBuffer(wiBuf, 'uint32'); ew.drawIndexed(wi.length); }
+  if (!Q.has('nostr')) { ew.setPipeline(pStr); ew.setBindGroup(0, bg0); ew.draw(48 * 6, 24); }
+  const o = eo.finish(), w = ew.finish();
+  bundles[n] = [[o, w], [o], [w]];
+}
 LOG('bundles ok');
 
-// size-dependent targets
-let W = 0, H = 0, msC, msA, msD, rC, rA, postBundles;
-const shPass = { colorAttachments: [], depthStencilAttachment: { view: shView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } };
-const mainPass = { colorAttachments: [
-  { view: null, resolveTarget: null, clearValue: [0.2, 0.5, 0.8, 1], loadOp: 'clear', storeOp: 'discard' },
-  { view: null, resolveTarget: null, clearValue: [0, 0, 1, 0], loadOp: 'clear', storeOp: 'discard' }],
-  depthStencilAttachment: { view: null, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } };
+// size / level dependent resources
+let W = 0, H = 0, RW = 0, RH = 0, scale = 1, MS = 0, shSize = 0, waterHi = 1;
+let msC, msA, msD, rC, rA, postBundles, shTex, shView, bg1;
+const SPLIT = Q.has('split'), UNCAP = Q.has('uncapped') && OFF;
+const shPass = { colorAttachments: [], depthStencilAttachment: { view: null, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } };
+const mkMain = (load, store) => ({ colorAttachments: [
+  { view: null, resolveTarget: undefined, clearValue: [0.2, 0.5, 0.8, 1], loadOp: load, storeOp: store },
+  { view: null, resolveTarget: undefined, clearValue: [0, 0, 1, 0], loadOp: load, storeOp: store }],
+  depthStencilAttachment: { view: null, depthClearValue: 1, depthLoadOp: load, depthStoreOp: 'store' } });
+const mainPass = mkMain('clear', 'discard'), objPass = mkMain('clear', 'store'), watPass = mkMain('load', 'discard');
 const postAtt = { view: null, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] };
 const postPass = { colorAttachments: [postAtt] };
-const pointS = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+const linS = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+function setShadow(n) {
+  if (n === shSize) return;
+  shSize = n; shTex && shTex.destroy();
+  shTex = device.createTexture({ size: [n, n], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+  shView = shTex.createView(); shPass.depthStencilAttachment.view = shView;
+  bg1 = device.createBindGroup({ layout: g1L, entries: [{ binding: 0, resource: shView }, { binding: 1, resource: cmpS }] });
+  for (const k in bundles) bundles[k] = null; // they reference bg1
+}
+function targets() {
+  const [mp, n, sh, wd] = LADDER[level];
+  setShadow(sh); waterHi = wd;
+  if (!bundles[n]) recordMain(n);
+  const sc = mp ? Math.max(0.5, Math.min(1, Math.sqrt(mp * 1e6 / (W * H)))) : 1;
+  const rw = Math.max(1, Math.round(W * sc)), rh = Math.max(1, Math.round(H * sc));
+  if (rw === RW && rh === RH && n === MS) return;
+  RW = rw; RH = rh; MS = n; scale = rh / H;
+  for (const t of [msC, msA, msD, rC, rA]) t && t.destroy();
+  const mk = (format, sc, extra = 0) => device.createTexture({ size: [RW, RH], format, sampleCount: sc, usage: GPUTextureUsage.RENDER_ATTACHMENT | extra });
+  msC = mk(HDR, MS); msA = mk(AUX, MS); msD = mk('depth24plus', MS, GPUTextureUsage.TEXTURE_BINDING);
+  rC = mk(HDR, 1, GPUTextureUsage.TEXTURE_BINDING); rA = mk(AUX, 1, GPUTextureUsage.TEXTURE_BINDING);
+  const vC = msC.createView(), vA = msA.createView(), vD = msD.createView(), vrC = rC.createView(), vrA = rA.createView();
+  for (const p of [mainPass, objPass, watPass]) {
+    p.colorAttachments[0].view = vC; p.colorAttachments[1].view = vA; p.depthStencilAttachment.view = vD;
+    p.colorAttachments[0].resolveTarget = p === objPass ? undefined : vrC; p.colorAttachments[1].resolveTarget = p === objPass ? undefined : vrA;
+  }
+  const bgp = device.createBindGroup({ layout: gpL, entries: [{ binding: 0, resource: vrC }, { binding: 1, resource: vrA }, { binding: 2, resource: linS }, { binding: 3, resource: vD }] });
+  const pe = device.createRenderBundleEncoder({ colorFormats: [fmt] });
+  pe.setPipeline(pPost); pe.setBindGroup(0, bg0); pe.setBindGroup(1, bgp); pe.draw(3);
+  postBundles = [pe.finish()];
+}
 function resize() {
   const dpr = Q.has('w') ? 1 : devicePixelRatio || 1;
   const w = Q.has('w') ? +Q.get('w') : Math.round(canvas.clientWidth * dpr), h = Q.has('h') ? +Q.get('h') : Math.round(canvas.clientHeight * dpr);
   if (w === W && h === H) return;
   W = canvas.width = w; H = canvas.height = h;
-  for (const t of [msC, msA, msD, rC, rA, offTex]) t && t.destroy();
-  if (OFF) { offTex = device.createTexture({ size: [W, H], format: fmt, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC }); offView = offTex.createView(); }
-  const mk = (format, sc, extra = 0) => device.createTexture({ size: [W, H], format, sampleCount: sc, usage: GPUTextureUsage.RENDER_ATTACHMENT | extra });
-  msC = mk(HDR, MSAA); msA = mk(AUX, MSAA); msD = mk('depth24plus', MSAA, GPUTextureUsage.TEXTURE_BINDING);
-  rC = mk(HDR, 1, GPUTextureUsage.TEXTURE_BINDING); rA = mk(AUX, 1, GPUTextureUsage.TEXTURE_BINDING);
-  mainPass.colorAttachments[0].view = msC.createView(); mainPass.colorAttachments[0].resolveTarget = rC.createView();
-  mainPass.colorAttachments[1].view = msA.createView(); mainPass.colorAttachments[1].resolveTarget = rA.createView();
-  mainPass.depthStencilAttachment.view = msD.createView();
-  const bgp = device.createBindGroup({ layout: gpL, entries: [{ binding: 0, resource: rC.createView() }, { binding: 1, resource: rA.createView() }, { binding: 2, resource: pointS }, { binding: 3, resource: msD.createView() }] });
-  const pe = device.createRenderBundleEncoder({ colorFormats: [fmt] });
-  pe.setPipeline(pPost); pe.setBindGroup(0, bg0); pe.setBindGroup(1, bgp); pe.draw(3);
-  postBundles = [pe.finish()];
+  if (OFF) { offTex && offTex.destroy(); offTex = device.createTexture({ size: [W, H], format: fmt, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC }); offView = offTex.createView(); }
+  RW = 0; targets();
 }
 
 // ---------- camera ----------
@@ -606,6 +684,21 @@ function ortho(out, ex, ey, ez, rx, ry, rz, ux, uy, uz, fx, fy, fz, hw, hh, n, f
   out[3] = 0; out[7] = 0; out[11] = 0; out[15] = 1;
 }
 let zoomT = 17;
+let maskM = 0, maskS = 0;
+// wake: 47 segments in 6 groups of 8; each group gets an xz box (padded by the widest V spread) so the water shader can skip groups
+const WBX = new Float32Array(24);
+function wakeBoxes() {
+  for (let g = 0; g < 6; g++) {
+    let x0 = 1e9, z0 = 1e9, x1 = -1e9, z1 = -1e9, live = 0;
+    for (let i = g * 8; i <= Math.min(g * 8 + 8, 47); i++) {
+      const o = i * 4; if (wake[o + 3] <= 0) continue; live = 1;
+      const pad = 0.7 + wake[o + 2] * 0.55 + 0.6;
+      x0 = Math.min(x0, wake[o] - pad); z0 = Math.min(z0, wake[o + 1] - pad); x1 = Math.max(x1, wake[o] + pad); z1 = Math.max(z1, wake[o + 1] + pad);
+    }
+    if (!live) { x0 = z0 = 1e9; x1 = z1 = -1e9; }
+    WBX[g * 4] = x0; WBX[g * 4 + 1] = z0; WBX[g * 4 + 2] = x1; WBX[g * 4 + 3] = z1;
+  }
+}
 let uo = 0;
 function put(a, b, c, d) { FU[uo++] = a; FU[uo++] = b; FU[uo++] = c; FU[uo++] = d; }
 function updateUniforms(dt) {
@@ -627,11 +720,24 @@ function updateUniforms(dt) {
   const sfx = -lx, sfy = -ly, sfz = -lz;
   let srx = sfz, sry = 0, srz = -sfx; const srl = len2(srx, srz); srx /= srl; srz /= srl;
   const sux = sry * sfz - srz * sfy, suy = srz * sfx - srx * sfz, suz = srx * sfy - sry * sfx;
-  const ext = Math.max(90, hw * 1.25 + 10), tex = ext * 2 / SHADOW;
+  const ext = Math.max(90, hw * 1.25 + 10), tex = ext * 2 / shSize;
   let px = cam.x * srx + cam.z * srz, py = cam.x * sux + cam.z * suz, pz = cam.x * sfx + cam.z * sfz;
   px = Math.round(px / tex) * tex; py = Math.round(py / tex) * tex;
   const cxw = srx * px + sux * py + sfx * pz, cyw = sry * px + suy * py + sfy * pz, czw = srz * px + suz * py + sfz * pz;
-  ortho(SM, cxw - sfx * 150, cyw - sfy * 150, czw - sfz * 150, srx, sry, srz, sux, suy, suz, sfx, sfy, sfz, ext, ext, 1, 300);
+  const sex = cxw - sfx * 150, sey = cyw - sfy * 150, sez = czw - sfz * 150;
+  ortho(SM, sex, sey, sez, srx, sry, srz, sux, suy, suz, sfx, sfy, sfz, ext, ext, 1, 300);
+  // cull islands against both ortho frusta (bounding spheres); only rewrite indirect args when visibility changes
+  let mm = 0, sm = 0;
+  for (let i = 0; i < ISL.length; i++) {
+    const o = i * 4, X = IBS[o], Y = IBS[o + 1], Z = IBS[o + 2], R = IBS[o + 3];
+    let dx = X - ex, dy = Y - ey, dz = Z - ez;
+    if (Math.abs(dx * rx + dy * ry + dz * rz) < hw + R && Math.abs(dx * ux + dy * uy + dz * uz) < hh + R) mm |= 1 << i;
+    dx = X - sex; dy = Y - sey; dz = Z - sez;
+    if (Math.abs(dx * srx + dy * sry + dz * srz) < ext + R && Math.abs(dx * sux + dy * suy + dz * suz) < ext + R) sm |= 1 << i;
+  }
+  if (NOCULL) { mm = -1; sm = -1; }
+  if (mm !== maskM) { maskM = mm; for (let k = 0; k < DR.length; k++) indMain[k * 5 + 1] = (mm >> DR[k][2]) & 1 ? DR[k][1].count : 0; device.queue.writeBuffer(indMainBuf, 0, indMain); }
+  if (sm !== maskS) { maskS = sm; for (let k = 0; k < DR.length; k++) indSh[k * 5 + 1] = (sm >> DR[k][2]) & 1 ? DR[k][1].count : 0; device.queue.writeBuffer(indShBuf, 0, indSh); }
   // fill uniform block
   FU.set(M, 0); FU.set(SM, 16);
   uo = 32;
@@ -652,35 +758,94 @@ function updateUniforms(dt) {
   const wsx = Math.sin(S.windA) * rx + Math.cos(S.windA) * rz, wsy = Math.sin(S.windA) * ux + Math.cos(S.windA) * uz;
   const bsx = Math.sin(S.th) * rx + Math.cos(S.th) * rz, bsy = Math.sin(S.th) * ux + Math.cos(S.th) * uz;
   put(S.sheet, Math.atan2(wsx, -wsy), Math.atan2(bsx, -bsy), Math.abs(S.u));
+  put(RW, RH, scale, 1 / shSize);
+  put(waterHi, 0, 0, 0);
+  wakeBoxes(); FU.set(WBX, uo); uo += 24;
   FU.set(wake, uo); uo += 192;
   FU.set(streak, uo);
   device.queue.writeBuffer(fBuf, 0, FU);
 }
 
-// ---------- timing / bench ----------
+// ---------- GPU timing (bench + adaptive quality) ----------
+// 8 timestamps per frame: shadow, main (or objects with &split), water (&split only), post — begin/end each
 const MAXF = 16384;
-const ft = new Float64Array(MAXF), gt = new Float64Array(MAXF);
-let nf = 0;
-let qs, qResolve, qAccum, qRead;
+const SECS = Q.has('secs') ? +Q.get('secs') : 60;
+const ft = new Float64Array(MAXF), PASSN = ['shadow', 'main', 'water', 'post'];
+let nf = 0, measuring = false;
+let qs, qResolve, qAccum;
+const RBN = 3, rbBuf = [], rbBusy = new Uint8Array(RBN), rbCb = [];
+const lvlHist = new Uint16Array(LADDER.length);
 if (hasTS) {
-  qs = device.createQuerySet({ type: 'timestamp', count: 2 });
-  qResolve = device.createBuffer({ size: 256, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-  qAccum = device.createBuffer({ size: MAXF * 16, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-  shPass.timestampWrites = { querySet: qs, beginningOfPassWriteIndex: 0 };
-  postPass.timestampWrites = { querySet: qs, endOfPassWriteIndex: 1 };
+  qs = device.createQuerySet({ type: 'timestamp', count: 8 });
+  qResolve = device.createBuffer({ size: 64, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+  if (BENCH) qAccum = device.createBuffer({ size: MAXF * 64, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  shPass.timestampWrites = { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
+  mainPass.timestampWrites = { querySet: qs, beginningOfPassWriteIndex: 2, endOfPassWriteIndex: 3 };
+  objPass.timestampWrites = mainPass.timestampWrites;
+  watPass.timestampWrites = { querySet: qs, beginningOfPassWriteIndex: 4, endOfPassWriteIndex: 5 };
+  postPass.timestampWrites = { querySet: qs, beginningOfPassWriteIndex: 6, endOfPassWriteIndex: 7 };
+  // small readback ring for the live controller: one map every few frames (each map costs a promise; nothing else allocates)
+  for (let i = 0; i < RBN; i++) {
+    rbBuf[i] = device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    rbCb[i] = () => { const u = new Uint32Array(rbBuf[i].getMappedRange()); gpuSample((u[14] - u[0]) / 1e6 + (u[15] - u[1]) * 4294.967296); rbBuf[i].unmap(); rbBusy[i] = 0; };
+  }
 }
-const cbs = [null];
-let measuring = false;
+
+// ---------- adaptive quality ----------
+// Picks a ladder level so the whole-frame GPU time stays under ~80% of the display's frame period.
+// High-refresh displays: below level 4 it prefers rendering every other vsync (stable 60/72 Hz) over a mushy image.
+let period = 1000 / 60, div = 1, skip = 0;
+let gSum = 0, gN = 0, gMax = 0, winT = 0, coolT = 0, upBlock = 0, lastUp = -1e9;
+const pint = new Float64Array(64); let pn = 0;
+function gpuSample(ms) { if (ms > 0 && ms < 1000) { gSum += ms; gN++; if (ms > gMax) gMax = ms; } }
+function setLevel(L, now) {
+  const n = LADDER[L][1];
+  if (!pipes[n]) { otherMS(); return false; }
+  level = L; targets(); coolT = now; gSum = gN = gMax = 0;
+  return true;
+}
+function adapt(now, raw) {
+  // display period: lowest typical interval over the last 64 frames (rAF timestamps are vsync aligned)
+  pint[pn++ & 63] = raw;
+  if ((pn & 63) === 0) { let m = 1e9; for (let i = 0; i < 64; i++) m = Math.min(m, pint[i]); if (m > 4 && m < 40) period = period * 0.5 + m * 0.5; }
+  if (!ADAPT || !hasTS || now - winT < 500) return;
+  winT = now;
+  if (gN < 8 || now - coolT < 600) { gSum = gN = gMax = 0; return; }
+  const g = gSum / gN, budget = 0.8 * period * div, hiHz = period < 12;
+  gSum = gN = gMax = 0;
+  if (g > budget) {
+    if (now - lastUp < 3000) upBlock = now + 15000; // the step up didn't fit: don't retry for a while
+    if (hiHz && div === 1 && level <= 4) { div = 2; coolT = now; }
+    else if (level > 0) setLevel(level - 1, now);
+  } else if (now > upBlock) {
+    const nb = 0.8 * period;
+    if (div === 2 && level === TOP && g * 0.5 < nb * 0.62) { div = 1; coolT = now; lastUp = now; }
+    else if (level < TOP && g < budget * 0.62) { if (setLevel(level + 1, now)) lastUp = now; }
+  }
+}
+
+const cbs = [null], bQ = [null];
+let frameNo = 0;
 function frame(dt) {
   updateUniforms(dt);
+  const B = bundles[MS];
   const enc = device.createCommandEncoder();
   let p = enc.beginRenderPass(shPass); p.executeBundles(shBundles); p.end();
-  p = enc.beginRenderPass(mainPass); p.executeBundles(mainBundles); p.end();
+  if (SPLIT) {
+    p = enc.beginRenderPass(objPass); p.executeBundles(B[1]); p.end();
+    p = enc.beginRenderPass(watPass); p.executeBundles(B[2]); p.end();
+  } else { p = enc.beginRenderPass(mainPass); p.executeBundles(B[0]); p.end(); }
   postAtt.view = OFF ? offView : ctx.getCurrentTexture().createView();
   p = enc.beginRenderPass(postPass); p.executeBundles(postBundles); p.end();
-  if (hasTS && measuring && nf < MAXF) { enc.resolveQuerySet(qs, 0, 2, qResolve, 0); enc.copyBufferToBuffer(qResolve, 0, qAccum, nf * 16, 16); }
+  let rb = -1;
+  if (hasTS) {
+    enc.resolveQuerySet(qs, 0, 8, qResolve, 0);
+    if (measuring && nf < MAXF) enc.copyBufferToBuffer(qResolve, 0, qAccum, nf * 64, 64);
+    if (ADAPT && (++frameNo & 3) === 0) for (let i = 0; i < RBN; i++) if (!rbBusy[i]) { rb = i; rbBusy[i] = 1; enc.copyBufferToBuffer(qResolve, 0, rbBuf[i], 0, 64); break; }
+  }
   cbs[0] = enc.finish();
   device.queue.submit(cbs);
+  if (rb >= 0) rbBuf[rb].mapAsync(GPUMapMode.READ).then(rbCb[rb]);
 }
 
 // ---------- input ----------
@@ -714,10 +879,12 @@ document.getElementById('msg').remove();
 if (CAPTURE) {
   // deterministic stepping for screenshots / frame sequences
   const show = async () => {
-    const bpr = W * 4, rb = device.createBuffer({ size: bpr * H, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const bpr = Math.ceil(W * 4 / 256) * 256, rb = device.createBuffer({ size: bpr * H, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const e = device.createCommandEncoder(); e.copyTextureToBuffer({ texture: offTex }, { buffer: rb, bytesPerRow: bpr }, [W, H]); device.queue.submit([e.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(rb.getMappedRange().slice(0)), W, H), 0, 0); rb.destroy();
+    const src = new Uint8Array(rb.getMappedRange()), px = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y++) px.set(src.subarray(y * bpr, y * bpr + W * 4), y * W * 4);
+    ctx.putImageData(new ImageData(px, W, H), 0, 0); rb.destroy();
   };
   window.__frame = async (t, dtFrame = 1 / 30) => { while (S.time < t - 1e-6) { sim(Math.min(dtFrame, t - S.time)); updateUniforms(dtFrame); } frame(dtFrame); await show(); };
   if (SHOT >= 0) {
@@ -734,44 +901,81 @@ if (CAPTURE) {
   }
   window.__ready = true;
 } else {
-  let last = performance.now(), t0 = last, warm = 0;
+  let last = performance.now(), t0 = last, warm = 0, pend = 0;
   const loop = now => {
-    let dt = (now - last) / 1000; last = now;
-    const raw = dt * 1000;
+    const raw = now - last;
+    if (div === 2 && !skip && !UNCAP) { skip = 1; requestAnimationFrame(loop); return; } // half-rate on high-refresh displays
+    skip = 0;
+    let dt = raw / 1000; last = now;
     if (dt > 0.1) dt = 0.1;
     if (BENCH) {
       if (warm < WARM) { warm++; if (warm === WARM) { measuring = true; t0 = now; nf = 0; window.__m = 1; } }
-      else if (nf < MAXF) { ft[nf++] = raw; }
+      else if (nf < MAXF) { ft[nf++] = raw; lvlHist[level]++; }
       const el = (now - t0) / 1000;
       zoomT = 22 + 8 * Math.sin(el * 0.21);
-      if (measuring && el >= 60) { measuring = false; finishBench(); }
+      if (measuring && el >= SECS) { measuring = false; finishBench(); }
     }
+    adapt(now, raw / div);
     sim(dt);
     frame(dt);
-    // off-screen (headless) has no presentation back-pressure: wait for the GPU so work cannot pile up
-    if (OFF) device.queue.onSubmittedWorkDone().then(raf); else requestAnimationFrame(loop);
+    // off-screen has no presentation back-pressure: wait for the GPU so work cannot pile up
+    // &uncapped (with &offscreen): next frame as soon as the GPU is done, so it stays saturated and at full clocks
+    if (OFF) { if (!pend) { pend = 1; device.queue.onSubmittedWorkDone().then(UNCAP ? next : raf); } } else requestAnimationFrame(loop);
   };
-  const raf = () => requestAnimationFrame(loop);
-  if (BENCH) window.__cpu = n => { for (let i = 0; i < n; i++) { sim(1 / 180); updateUniforms(1 / 180); } };
+  const raf = () => { pend = 0; requestAnimationFrame(loop); };
+  const next = () => { pend = 0; loop(performance.now()); };
+  if (BENCH) {
+    window.__cpu = n => { for (let i = 0; i < n; i++) { sim(1 / 180); updateUniforms(1 / 180); } };
+    window.__frames = async n => { for (let i = 0; i < n; i++) { sim(1 / 180); frame(1 / 180); if ((i & 31) === 31) await device.queue.onSubmittedWorkDone(); } };
+  }
   requestAnimationFrame(loop);
+  setTimeout(otherMS, 3000);
 }
 
 async function finishBench() {
   const n = nf;
-  const st = a => { const s = Array.from(a).sort((x, y) => x - y); if (!s.length) return null; const avg = s.reduce((x, y) => x + y, 0) / s.length; return { avg: +avg.toFixed(3), p99: +s[Math.floor(s.length * 0.99)].toFixed(3), max: +s[s.length - 1].toFixed(3) }; };
-  const rep = { frames: n, size: [W, H], adapter: adapter.info && adapter.info.description, frameMs: st(ft.subarray(1, n)) };
+  const st = a => { const s = Array.from(a).sort((x, y) => x - y); if (!s.length) return null; const avg = s.reduce((x, y) => x + y, 0) / s.length; return { avg: +avg.toFixed(3), p50: +s[Math.floor(s.length * 0.5)].toFixed(3), p99: +s[Math.floor(s.length * 0.99)].toFixed(3), max: +s[s.length - 1].toFixed(3) }; };
+  const iv = ft.subarray(1, n), med = st(iv).p50;
+  const budget = Q.has('budget') ? +Q.get('budget') : 11;
+  const rep = {
+    adapter: { vendor: AI.vendor, architecture: AI.architecture, device: AI.device, description: AI.description },
+    ua: navigator.userAgent.replace(/^.*?(Chrome\/[\d.]+|Firefox\/[\d.]+|Version\/[\d.]+ Safari).*$/, '$1'),
+    size: [W, H], dpr: devicePixelRatio, scene: [RW, RH], msaa: MS, shadow: shSize, level, adaptive: ADAPT,
+    secs: SECS, frames: n, refreshMs: +med.toFixed(2), frameMs: st(iv),
+    framesOver16_7: Array.from(iv).filter(x => x > 16.7).length,
+    missedVsync: Array.from(iv).filter(x => x > med * 1.5).length,
+  };
+  if (ADAPT) rep.levelFrames = Array.from(lvlHist);
   if (hasTS) {
     await device.queue.onSubmittedWorkDone();
-    const rb = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const e = device.createCommandEncoder(); e.copyBufferToBuffer(qAccum, 0, rb, 0, n * 16); device.queue.submit([e.finish()]);
+    const rb = device.createBuffer({ size: n * 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const e = device.createCommandEncoder(); e.copyBufferToBuffer(qAccum, 0, rb, 0, n * 64); device.queue.submit([e.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
     const v = new BigUint64Array(rb.getMappedRange());
-    for (let i = 0; i < n; i++) gt[i] = Number(v[i * 2 + 1] - v[i * 2]) / 1e6;
-    rep.gpuMs = st(gt.subarray(0, n).filter(x => x > 0 && x < 1e5));
-    rep.over16_7 = Array.from(gt.subarray(0, n)).filter(x => x > 16.7).length;
+    const ok = x => x > 0 && x < 1e4, ms = (a, b) => Number(b - a) / 1e6;
+    // passMs: exclusive time = this pass's end - previous pass's end (each pass depends on the previous one, so this
+    // attributes correctly on tile-based GPUs, where pass spans overlap); passSpanMs: raw begin..end of each pass
+    const tot = [], per = PASSN.map(() => []), span = PASSN.map(() => []);
+    for (let i = 0; i < n; i++) {
+      const o = i * 8, t = ms(v[o], v[o + 7]);
+      if (!ok(t)) continue;
+      tot.push(t);
+      let prev = v[o];
+      for (let k = 0; k < 4; k++) if (k !== 2 || SPLIT) { per[k].push(ms(prev, v[o + k * 2 + 1])); span[k].push(ms(v[o + k * 2], v[o + k * 2 + 1])); prev = v[o + k * 2 + 1]; }
+    }
+    rep.gpuMs = st(tot);
+    rep.passMs = {}; rep.passSpanMs = {}; PASSN.forEach((nm, k) => { if (per[k].length) { rep.passMs[nm] = st(per[k]); rep.passSpanMs[nm] = st(span[k]); } });
+    rep.gpuOver16_7 = tot.filter(x => x > 16.7).length;
+    rep.budget = { avgGpuMs: budget, p99GpuMs: 16.7, missedVsyncPct: 0.5 };
+    rep.pass = rep.gpuMs.avg <= budget && rep.gpuMs.p99 <= 16.7 && rep.missedVsync <= n * 0.005;
   }
-  rep.framesOver16_7 = Array.from(ft.subarray(1, n)).filter(x => x > 16.7).length;
   window.__bench = rep;
   console.log('BENCH', JSON.stringify(rep));
-  const d = document.createElement('pre'); d.id = 'bench'; d.textContent = JSON.stringify(rep, null, 2); document.body.appendChild(d);
+  const txt = JSON.stringify(rep, null, 2);
+  const d = document.createElement('div'); d.id = 'bench';
+  const b = document.createElement('button'); b.textContent = 'Copy report';
+  b.onclick = () => navigator.clipboard.writeText(txt).then(() => { b.textContent = 'Copied'; }, () => { b.textContent = 'Copy failed: select the text'; });
+  const h = document.createElement('b'); h.textContent = rep.pass === undefined ? 'no GPU timestamps' : rep.pass ? 'PASS' : 'FAIL'; h.style.color = rep.pass ? '#186a2e' : '#a3261b';
+  const pre = document.createElement('pre'); pre.textContent = txt;
+  d.append(h, ' ', b, pre); document.body.appendChild(d);
 }

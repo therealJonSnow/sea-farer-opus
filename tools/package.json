@@ -12,5 +12,8 @@
   "dependencies": {
     "esbuild": "^0.28.2",
     "terser": "^5.51.2"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1"
   }
 }
