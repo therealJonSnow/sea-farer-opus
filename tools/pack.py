@@ -11,7 +11,7 @@ sh.save(out + '/seq_overview.png')
 # 1:1 crops of 4 consecutive frames for 3 regions (centre/boat, top-left, bottom-right)
 regs = {'center': (1280 - 400, 720 - 300), 'topleft': (200, 150), 'bottomright': (1700, 900)}
 for name, (x, y) in regs.items():
-    for start in (30, 90):
+    for start in (20, len(fr) - 6):
         strip = Image.new('RGB', (1600, 1200))
         for k in range(4):
             im = Image.open(fr[start + k]).crop((x, y, x + 800, y + 600))
