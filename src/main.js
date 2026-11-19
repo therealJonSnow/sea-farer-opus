@@ -479,18 +479,19 @@ let offTex, offView;
 // ---------- quality ladder ----------
 // [max scene megapixels (0 = native), MSAA samples, shadow map size, water detail (1 = full)]
 // Post + HUD always run at native resolution; only the 3D scene is scaled.
+// WebGPU only offers 1x or 4x MSAA, so resolution drops first and MSAA goes only at the very bottom.
 const LADDER = [
-  [0.6, 2, 1024, 0],
-  [1.0, 2, 1024, 0],
-  [1.5, 2, 1024, 0],
-  [2.1, 2, 1024, 1],
-  [2.8, 2, 2048, 1],
+  [0.9, 1, 1024, 0],
+  [1.2, 4, 1024, 0],
+  [1.6, 4, 1024, 0],
+  [2.1, 4, 1024, 1],
+  [2.1, 4, 2048, 1],
   [2.8, 4, 2048, 1],
   [3.7, 4, 2048, 1],
   [0, 4, 2048, 1]];
 const TOP = LADDER.length - 1;
 const vendor = (AI.vendor || '').toLowerCase();
-// conservative start: discrete GPUs at the top, Apple one below, everything else (integrated, mobile, unknown) at 1080p-class / MSAA 2x
+// conservative start: discrete GPUs at the top, Apple one below, everything else (integrated, mobile, unknown) at a 1080p-class scene
 const L0 = AI.isFallbackAdapter ? 0 : /nvidia|amd|ati/.test(vendor) ? TOP : vendor === 'apple' ? TOP - 1 : 3;
 let level = Q.has('q') ? clamp(+Q.get('q'), 0, TOP) : (BENCH || CAPTURE) && !Q.has('adaptive') ? TOP : L0;
 const ADAPT = !Q.has('q') && (Q.has('adaptive') || !(BENCH || CAPTURE));
@@ -557,20 +558,21 @@ const g0L = device.createBindGroupLayout({ entries: [
   { binding: 0, visibility: 3, buffer: {} }, { binding: 1, visibility: 3, buffer: {} }, { binding: 2, visibility: 3, texture: { sampleType: 'uint' } }] });
 const g1L = device.createBindGroupLayout({ entries: [
   { binding: 0, visibility: 2, texture: { sampleType: 'depth' } }, { binding: 1, visibility: 2, sampler: { type: 'comparison' } }] });
-const gpL = device.createBindGroupLayout({ entries: [
-  { binding: 0, visibility: 2, texture: { sampleType: 'float' } }, { binding: 1, visibility: 2, texture: { sampleType: 'float' } }, { binding: 2, visibility: 2, sampler: { type: 'filtering' } }, { binding: 3, visibility: 2, texture: { sampleType: 'depth', multisampled: true } }, { binding: 4, visibility: 2, texture: { sampleType: 'unfilterable-float' } }] });
+const gpLE = ms => [
+  { binding: 0, visibility: 2, texture: { sampleType: 'float' } }, { binding: 1, visibility: 2, texture: { sampleType: 'float' } }, { binding: 2, visibility: 2, sampler: { type: 'filtering' } }, { binding: 3, visibility: 2, texture: { sampleType: 'depth', multisampled: ms } }, { binding: 4, visibility: 2, texture: { sampleType: 'unfilterable-float' } }];
+const gpL = device.createBindGroupLayout({ entries: gpLE(true) }), gpL1 = device.createBindGroupLayout({ entries: gpLE(false) });
 const bg0 = device.createBindGroup({ layout: g0L, entries: [{ binding: 0, resource: { buffer: fBuf } }, { binding: 1, resource: { buffer: iBuf } }, { binding: 2, resource: sdTex.createView() }] });
 const cmpS = device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' });
 const layScene = device.createPipelineLayout({ bindGroupLayouts: [g0L, g1L] });
 const layShadow = device.createPipelineLayout({ bindGroupLayouts: [g0L] });
-const layPost = device.createPipelineLayout({ bindGroupLayouts: [g0L, gpL] });
+const layPost = device.createPipelineLayout({ bindGroupLayouts: [g0L, gpL] }), layPost1 = device.createPipelineLayout({ bindGroupLayouts: [g0L, gpL1] });
 
 const mod = code => device.createShaderModule({ code });
 const LOG = (...a) => Q.has('dbg') && console.log(...a);
 device.lost.then(i => console.log('DEVICE LOST', i.reason, i.message));
 device.addEventListener('uncapturederror', e => console.log('GPUERR', e.error.message));
-const mObj = mod(COMMON + SCENE + OBJ), mObjS = mod(COMMON + OBJ.replace(/@fragment[\s\S]*$/, '').replace(/fn terrainCol[\s\S]*$/, '')), mWat = mod(COMMON + SCENE + WATER), mStr = mod(COMMON + STREAK), mPost = mod(COMMON + POST);
-for (const m of [mObj, mObjS, mWat, mStr, mPost]) { const info = await m.getCompilationInfo(); for (const e of info.messages) if (e.type === 'error') err('WGSL: ' + e.message + ' @' + e.lineNum); }
+const mObj = mod(COMMON + SCENE + OBJ), mObjS = mod(COMMON + OBJ.replace(/@fragment[\s\S]*$/, '').replace(/fn terrainCol[\s\S]*$/, '')), mWat = mod(COMMON + SCENE + WATER), mStr = mod(COMMON + STREAK), mPost = mod(COMMON + POST), mPost1 = mod(COMMON + POST.replace('texture_depth_multisampled_2d', 'texture_depth_2d'));
+for (const m of [mObj, mObjS, mWat, mStr, mPost, mPost1]) { const info = await m.getCompilationInfo(); for (const e of info.messages) if (e.type === 'error') err('WGSL: ' + e.message + ' @' + e.lineNum); }
 
 LOG('modules ok');
 const objVB = [
@@ -584,17 +586,20 @@ const ds = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less
 const pipes = {};
 const scenePipes = n => Promise.all([
   device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mObj, entryPoint: 'vs', buffers: objVB }, fragment: { module: mObj, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: { count: n } }),
-  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mWat, entryPoint: 'vs', buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] }, fragment: { module: mWat, entryPoint: 'fs', targets: tgts }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: { count: n, alphaToCoverageEnabled: true } }),
+  device.createRenderPipelineAsync({ layout: layScene, vertex: { module: mWat, entryPoint: 'vs', buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] }, fragment: { module: mWat, entryPoint: 'fs', targets: tgts, constants: { NOMS: n === 1 ? 1 : 0 } }, primitive: { cullMode: 'none' }, depthStencil: ds, multisample: { count: n, alphaToCoverageEnabled: n > 1 } }),
   device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mStr, entryPoint: 'vs' }, fragment: { module: mStr, entryPoint: 'fs', targets: [{ format: HDR, blend: { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }, { format: AUX, writeMask: 0 }] }, depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }, multisample: { count: n } }),
 ]).then(p => { pipes[n] = p; bundles[n] = null; });
 const bundles = {};
 const n0 = LADDER[level][1];
+let pPost1 = null, pPost1P = null;
+const post1 = () => pPost1P || (pPost1P = device.createRenderPipelineAsync({ layout: layPost1, vertex: { module: mPost1, entryPoint: 'vs' }, fragment: { module: mPost1, entryPoint: 'fs', targets: [{ format: fmt }] } }).then(p => { pPost1 = p; }));
+
 const [pSh, pPost, pNoise] = await Promise.all([
   device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mObjS, entryPoint: 'vsShadow', buffers: objVB }, primitive: { cullMode: 'none' }, depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2 } }),
   device.createRenderPipelineAsync({ layout: layPost, vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fs', targets: [{ format: fmt }] } }),
   device.createRenderPipelineAsync({ layout: layShadow, vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fsNoise', targets: [{ format: 'rgba8unorm' }] } }),
-  scenePipes(n0)]);
-const otherMS = () => { if (!ADAPT) return; const n = n0 === 4 ? 2 : 4; if (!(n in pipes)) { pipes[n] = null; scenePipes(n); } };
+  scenePipes(n0), n0 === 1 && post1()]);
+const otherMS = () => { if (!ADAPT) return; const n = n0 === 4 ? 1 : 4; if (!(n in pipes)) { pipes[n] = null; scenePipes(n); } if (n === 1) post1(); };
 
 LOG('pipelines ok');
 // render bundles: everything dynamic lives in uniforms / indirect args, so command lists are static
@@ -653,16 +658,20 @@ function targets() {
   RW = rw; RH = rh; MS = n; scale = rh / H;
   for (const t of [msC, msA, msD, rC, rA]) t && t.destroy();
   const mk = (format, sc, extra = 0) => device.createTexture({ size: [RW, RH], format, sampleCount: sc, usage: GPUTextureUsage.RENDER_ATTACHMENT | extra });
-  msC = mk(HDR, MS); msA = mk(AUX, MS); msD = mk('depth24plus', MS, GPUTextureUsage.TEXTURE_BINDING);
+  // 4x: render to MSAA targets and resolve; 1x: render straight into the single-sample targets the post pass reads
   rC = mk(HDR, 1, GPUTextureUsage.TEXTURE_BINDING); rA = mk(AUX, 1, GPUTextureUsage.TEXTURE_BINDING);
-  const vC = msC.createView(), vA = msA.createView(), vD = msD.createView(), vrC = rC.createView(), vrA = rA.createView();
+  msC = msA = null; if (MS > 1) { msC = mk(HDR, MS); msA = mk(AUX, MS); }
+  msD = mk('depth24plus', MS, GPUTextureUsage.TEXTURE_BINDING);
+  const vrC = rC.createView(), vrA = rA.createView(), vC = msC ? msC.createView() : vrC, vA = msA ? msA.createView() : vrA, vD = msD.createView();
   for (const p of [mainPass, objPass, watPass]) {
-    p.colorAttachments[0].view = vC; p.colorAttachments[1].view = vA; p.depthStencilAttachment.view = vD;
-    p.colorAttachments[0].resolveTarget = p === objPass ? undefined : vrC; p.colorAttachments[1].resolveTarget = p === objPass ? undefined : vrA;
+    const a = p.colorAttachments, res = MS > 1 && p !== objPass;
+    a[0].view = vC; a[1].view = vA; p.depthStencilAttachment.view = vD;
+    a[0].resolveTarget = res ? vrC : undefined; a[1].resolveTarget = res ? vrA : undefined;
+    a[0].storeOp = a[1].storeOp = res ? 'discard' : 'store';
   }
-  const bgp = device.createBindGroup({ layout: gpL, entries: [{ binding: 0, resource: vrC }, { binding: 1, resource: vrA }, { binding: 2, resource: linS }, { binding: 3, resource: vD }, { binding: 4, resource: nView }] });
+  const bgp = device.createBindGroup({ layout: MS > 1 ? gpL : gpL1, entries: [{ binding: 0, resource: vrC }, { binding: 1, resource: vrA }, { binding: 2, resource: linS }, { binding: 3, resource: vD }, { binding: 4, resource: nView }] });
   const pe = device.createRenderBundleEncoder({ colorFormats: [fmt] });
-  pe.setPipeline(pPost); pe.setBindGroup(0, bg0); pe.setBindGroup(1, bgp); pe.draw(3);
+  pe.setPipeline(MS > 1 ? pPost : pPost1); pe.setBindGroup(0, bg0); pe.setBindGroup(1, bgp); pe.draw(3);
   postBundles = [pe.finish()];
 }
 function resize() {
@@ -810,7 +819,7 @@ const pint = new Float64Array(64); let pn = 0;
 function gpuSample(ms) { if (ms > 0 && ms < 1000) { gSum += ms; gN++; if (ms > gMax) gMax = ms; } }
 function setLevel(L, now) {
   const n = LADDER[L][1];
-  if (!pipes[n]) { otherMS(); return false; }
+  if (!pipes[n] || (n === 1 && !pPost1)) { otherMS(); return false; }
   level = L; targets(); coolT = now; gSum = gN = gMax = 0;
   return true;
 }

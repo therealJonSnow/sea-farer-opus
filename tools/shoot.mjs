@@ -14,7 +14,7 @@ for (const k of list.split(',')) {
   if (first) { await p.goto(s.url('?noop')); await checkAdapter(p); first = false; }
   const t0 = Date.now();
   await p.goto(s.url(`?shot=${k}&w=${W}&h=${H}${extra}`));
-  try { await p.waitForFunction('window.__ready === true', null, { timeout: 300000 }); } catch (e) { console.log('timeout', k, await p.evaluate(() => document.body.innerText)); }
+  try { await p.waitForFunction('window.__ready === true', null, { timeout: 60000 }); } catch (e) { console.log('timeout', k, await p.evaluate(() => document.body.innerText)); }
   await p.waitForTimeout(200);
   await p.screenshot({ path: path.join(out, `shot${k}.png`) });
   console.log('shot', k, (Date.now() - t0) / 1000 + 's');

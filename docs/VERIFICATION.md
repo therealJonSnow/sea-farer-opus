@@ -4,7 +4,7 @@
 
 `index.html` is a single self-contained file: raw WebGPU, no engine, and no textures or model files. Everything is procedural.
 
-- Minified size: **50,818 bytes** (20,691 bytes gzipped).
+- Minified size: **59,257 bytes** (24,148 bytes gzipped). It was 50,818 / 20,691 before the performance pass; the extra ~8 KB is the adaptive-quality ladder, the 1× MSAA path, culling and the extended bench harness.
 
 ## Gate 1: Visual critic
 
@@ -34,30 +34,73 @@ The remaining minor issues are:
 
 Final renders are in `docs/renders/`: six stills and `flythrough.mp4`, which is the 3-second, 90-frame sequence the critic reviewed.
 
-## Gate 2: Performance — NOT verified on the target hardware
+## Gate 2: Performance (measured on a real GPU, 2026-11-19)
 
-The target is an RTX 5070 Ti with Chrome 157 at 2560×1440: average GPU time ≤ 11 ms and no frame over 16.7 ms during a 60 s scripted fly-through.
+**Machine:** Apple M2 Max (30-core GPU, Metal 3), macOS, Google Chrome 157.0.8103.79. Adapter reported as `{vendor: "apple", architecture: "metal-3"}`, not a fallback adapter. Displays: built-in 120 Hz ProMotion and an external 60 Hz 2560×1440 monitor.
 
-**I could not measure this.** The build container has no GPU, and Chromium here runs WebGPU on SwiftShader, a CPU rasterizer. Presenting to a WebGPU canvas also loses the device in this headless setup, so capture renders off-screen and reads the frame back.
+### How it's measured
 
-What *is* done:
+- `node tools/gpubench.mjs W H` is the A/B measure. Each of the six critic poses is rendered 600 times back to back (`?shot=K&gpubench`), with the GPU saturated so Apple's clock scaling stays at peak. It reports the **median** GPU time from timestamp queries, per pass and in total.
+- `node tools/bench.mjs W H "&secs=30"` runs the scripted fly-through, presented to a visible window with real vsync. It reports frame pacing, GPU avg/p50/p99/max per pass, the adapter, resolution and DPR, and a budget PASS/FAIL. The on-screen report has a "Copy report" button.
+- **Per-pass attribution:** pass times are "exclusive" (this pass's end minus the previous pass's end). On a tile-based GPU, raw begin/end spans overlap and don't add up. `&split` times water separately from the other objects.
+- **Caveat:** in presented runs at 60 Hz the M2 Max clocks down, so GPU ms looks higher than in saturated runs. Compare like with like.
 
-- **Harness:** `?bench` runs a 60 s scripted fly-through. The boat sails on autopilot through waypoints while the camera zoom sweeps. The harness records:
-  - GPU timestamp queries covering the whole frame, from the start of the shadow pass to the end of the post pass. Each frame's result is resolved and copied into a large GPU buffer and read back once at the end, so there are no per-frame map/await calls.
-  - The `requestAnimationFrame` interval for every frame, in a preallocated `Float64Array`.
+### Before → after, GPU ms per frame (fixed-pose median, mean of six poses)
 
-  It reports average, p99 and max for both, plus the number of frames over 16.7 ms. The report goes to the console, to `window.__bench` and to an on-screen panel.
-- **Harness validated on SwiftShader** at 1280×720: the timestamps resolve correctly and the report is generated. The numbers themselves (about 3.4 s of GPU time per frame on a CPU) say nothing about an RTX 5070 Ti.
-- **Design for frame pacing:**
-  - All pipelines are compiled up front with `createRenderPipelineAsync` before the first frame.
-  - All draw commands are recorded once into render bundles, and all animation runs from one uniform buffer.
-  - Shadows use one 2048² depth map, snapped to texels.
-  - The scene renders into an MSAA 4× rgba16f color target plus an rgba8 aux target, then a single full-screen post pass.
-  - Geometry is about 0.5 M vertices.
+| Pass | 2560×1440 before | after | 1280×720 before | after |
+| --- | --- | --- | --- | --- |
+| Shadow (2048²) | 0.16 | 0.07 | 0.13 | 0.08 |
+| Objects (terrain, trees, boat…) | 1.82 | 1.03 | 0.78 | 0.71 |
+| Water + streaks | 10.34 | 2.84 | 3.21 | 1.11 |
+| Post (ink, watercolor, HUD) | 1.20 | 0.77 | 0.33 | 0.43 |
+| **Total** | **13.66** | **4.74** | **4.47** | **2.33** |
 
-**To run the perf gate on the target machine:** open `index.html?bench` from a local HTTP server in Chrome on the 5070 Ti at 2560×1440, with the window fullscreen and DPR 1, or add `&w=2560&h=1440`. Wait about 62 s and read the JSON report. Alternatively run `node tools/bench.mjs 2560 1440 ""` with a GPU-backed Chrome.
+"Before" is the original renderer (commit 59793b1) with only the new timing harness added. It's pixel-identical to the original renders. "After" is at the top quality level (native resolution, 4× MSAA, 2048² shadows). The table was measured before the last outline/crescent tweak, which only removes work.
+
+Fly-through baseline on the original build, presented, 60 s: 2560×1440 GPU 13.2 ms avg / 19.1 p99 / 21.9 max, 1,374 frames over 16.7 ms. 1280×720: 6.1 / 7.5 / 8.9 ms.
+Fly-through after, presented, 30 s at 1280×720: GPU 3.9 avg / 4.9 p99, 120 Hz with 6 missed vsyncs out of 3,589 frames. With `&adaptive` at 2560×1440 on the 60 Hz display: 0 missed vsyncs out of 1,799 frames, PASS. The presented fixed-level run at 2560×1440 kept closing its browser window in this session, so that number still needs a re-run.
+
+### What changed
+
+- **Water:**
+  - `shoreD` used to loop over 22 islands per pixel and per vertex. Now a 720² `r8uint` nearest-island grid is baked at init, so each lookup evaluates one island exactly. The coastline stays analytic and pixel-identical.
+  - The wave normal is analytic and computed per vertex (it was 3 Gerstner evaluations per pixel).
+  - The Voronoi foam computes its 9 feature points once and reuses them for the border pass. That replaces 9 + 25 cells with hashing and sines, with identical output.
+  - Very low-frequency fields (pigment, calm patches, cloud shadow) are now per vertex.
+  - Line-width and lapping-ring noise only run where they can show.
+  - The wake loop skips 8-segment groups by CPU-computed bounding boxes.
+- **Post:** the static screen-space paper, wobble and pigment noise is baked once per canvas size into an `rgba8` texture, replacing about 13 value-noise evaluations per pixel.
+- **Objects:** cloud shadow per vertex. Per-island culling against the camera and shadow frusta through indirect draws, so the bundles stay static and culling is a tiny buffer write only when visibility changes.
+- **Visual changes requested on 2026-11-19:** removed the white "crest crescent" (horseshoe) wave marks, and made the ink outline thinner (sampling radius about −30%) and lighter (0.85 → 0.6 opacity).
+
+### Adaptive quality
+
+The ladder runs from level 0 to 7: `[scene megapixels, MSAA, shadow map, water detail]`. The post pass and HUD always render at native resolution; only the 3D scene is scaled.
+
+| Level | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Scene | 0.9 MP | 1.2 | 1.6 | 2.1 | 2.1 | 2.8 | 3.7 | native |
+| MSAA | 1× | 4× | 4× | 4× | 4× | 4× | 4× | 4× |
+| Shadow | 1024 | 1024 | 1024 | 1024 | 2048 | 2048 | 2048 | 2048 |
+| Water detail | low | low | low | full | full | full | full | full |
+| GPU ms (1440p, M2 Max) | 2.43 | 2.80 | — | 3.23 | 4.35 | — | 4.30 | 4.74 |
+
+- **No 2× MSAA tier.** WebGPU only allows sample counts 1 and 4, so 2× isn't possible. Resolution drops first, and 1× (with a hard alpha-tested coastline) is only the bottom rung.
+- **Start level:** discrete NVIDIA/AMD starts at 7, Apple at 6, and everything else (integrated, mobile, unknown) at 3. A fallback adapter starts at 0.
+- **Controller:**
+  - Every 0.5 s it compares the average whole-frame GPU time (timestamp readback every 4th frame) with 80% of the measured display period. It steps down when over and steps up when under 62%.
+  - A step up that doesn't fit blocks further steps up for 15 s.
+  - On high-refresh displays below level 4 it switches to rendering every other vsync rather than degrading further.
+  - The pipelines for the other MSAA count compile in the background.
+- **Flags:** `?q=N` pins a level, and `&adaptive` turns the controller on in bench mode.
+- Verified: every level renders correctly (shots at levels 0, 1, 3, 4 and 6), and the controller climbed from 6 to 7 on the M2 Max. **Not verified:** a run on a genuinely weaker GPU. This machine has no integrated GPU to force.
 
 ## Per-frame JS allocations
+
+Re-measured on 2026-11-19 with `node tools/alloc.mjs`, after JIT warm-up:
+
+- **CPU path** (sim plus uniform upload, the same measure as before): **62 B/frame**, unchanged from 61 B/frame within sampling noise. The culling test and wake boxes allocate nothing.
+- **Full frame** (new measure, including command encoding and submission): **221 B/frame**. This is mostly WebGPU's own wrapper objects (encoder, pass encoders, command buffer, swap-chain view) plus one `mapAsync` promise every 4th frame for the adaptive controller. There was no earlier full-frame figure to compare against.
 
 These were measured with a CDP sampling heap profile, which records objects even after they've been collected. It ran over 20,000 frames of the real per-frame CPU path (simulation plus uniform upload) after JIT warm-up: `node tools/alloc.mjs`, output in `docs/alloc.json`.
 
@@ -67,3 +110,11 @@ These were measured with a CDP sampling heap profile, which records objects even
 - WebGPU's API itself still creates a few wrapper objects every frame: the command encoder, the three pass encoders, the command buffer, and the swap-chain texture view. The API offers no way to avoid these.
 
 So the brief's "zero per-frame allocations" is met for application data. It is **not literally zero** because of this residual V8 boxing and the WebGPU wrapper objects.
+
+## Open items (paused 2026-11-19)
+
+- **Visual critic gate not re-run** after the performance pass and the outline/crescent change. The renders before the outline change were pixel-identical, or within 1–4/255, to the approved set. The outline change is a deliberate look change. Work-in-progress stills are in `docs/renders/wip/`, and the approved set in `docs/renders/` is untouched.
+- Remaining minor visual items not yet addressed: flickering canopy ink speck, hairpin wind streaks, straight cliff shading seam, cliff-corner sawtooth, overlapping gulls.
+- Presented 2560×1440 fixed-level fly-through needs a re-run: the visible browser window closed mid-run here.
+- No weaker-GPU run yet. Force a level with `?q=0..7` to preview the tiers.
+- Further GPU headroom: water is still about 60% of the frame (gust and warp noise, 9-tap shadow PCF on water), and the post ink pass does 9 MSAA depth loads plus 8 aux taps.

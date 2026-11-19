@@ -314,6 +314,7 @@ fn terrainCol(wp: vec3f, n: vec3f) -> vec3f {
 `;
 
 export const WATER = /* wgsl */`
+override NOMS = false;
 struct WOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) g: vec2f, @location(2) sd: f32, @location(3) n: vec3f, @location(4) lo: vec3f };
 // gradient of the undamped wave height at p
 fn wgrad(p: vec2f) -> vec2f {
@@ -415,14 +416,18 @@ fn creature(p: vec2f, k: i32) -> vec2f {
   c = mix(c, vec3f(0.16, 0.50, 0.80), spine * 0.7 * cdepth);
   // cat's paws: wind gust patches sliding downwind
   let wq = vec2f(dot(p, wind), dot(p, vec2f(-wind.y, wind.x)));
-  let gust = smoothstep(0.55, 0.78, fbm(vec2f(wq.x * 0.05 - t * 0.33, wq.y * 0.11)));
+  let hi = f.q.x > 0.5; // water detail tier: low drops the finest noise octaves
+  let gq = vec2f(wq.x * 0.05 - t * 0.33, wq.y * 0.11);
+  let gust = smoothstep(0.55, 0.78, select(vn(gq) * 0.5 + vn(gq * 2.03 + vec2f(1.7, 9.2)) * 0.25 + 0.11, fbm(gq), hi));
   c *= 1.0 - 0.06 * gust;
   // toon wave shading
   let ndl = dot(n, f.sun.xyz);
   c *= 0.9 + 0.16 * smoothstep(0.55, 0.75, ndl);
   // cell foam lines (stillness patches fade them)
   let wp2 = p + wind * t * 0.35;
-  let warp = vec2f(fbm(wp2 * 0.08), fbm(wp2 * 0.08 + 5.2)) * 3.0;
+  var warp: vec2f;
+  if (hi) { warp = vec2f(fbm(wp2 * 0.08), fbm(wp2 * 0.08 + 5.2)) * 3.0; }
+  else { warp = (vec2f(vn(wp2 * 0.08), vn(wp2 * 0.08 + 5.2)) * 0.5 + 0.23) * 3.0; }
   let vd = vor((wp2 + warp) * 0.17) / 0.17;
   let still = smoothstep(0.36, 0.6, v.lo.y);
   let aa = fwidth(vd) * 1.0;
@@ -430,18 +435,6 @@ fn creature(p: vec2f, k: i32) -> vec2f {
   if (vd < 0.145 + aa) { lw = 0.085 + 0.06 * fbm(p * 0.5); }
   let line = (1.0 - smoothstep(lw - aa, lw + aa, vd)) * mix(0.12, 1.0, still) * (0.45 + 0.55 * smoothstep(0.3, 0.6, vn(p * 0.25 + t * 0.15))) * smoothstep(1.5, 6.0, sd) * (1.0 + 0.3 * gust);
   var foam = line * 0.85;
-  // cartoon crest crescents that come and go
-  let cs = 14.0;
-  let cid = floor(wq / cs); let ch = h22(cid);
-  let ph = fract(t * 0.12 + ch.x);
-  let life = smoothstep(0.0, 0.25, ph) * smoothstep(1.0, 0.6, ph);
-  let cc = (cid + 0.25 + 0.5 * ch) * cs + vec2f(ph * 3.0, 0.0);
-  let lq = (wq - cc) / vec2f(1.0, 2.2);
-  let ra = length(lq);
-  let arc = abs(ra - 1.6) - 0.09 * (0.6 + 0.4 * life);
-  let arcm = smoothstep(-0.6, 0.4, lq.x) * smoothstep(0.0, 0.5, -lq.x + 1.6);
-  let caa = fwidth(arc) * 1.0;
-  foam = max(foam, (1.0 - smoothstep(-caa, caa, arc)) * arcm * life * step(0.45, ch.y) * smoothstep(1.0, 8.0, sd));
   // shoreline foam + lapping rings
   let sa = fwidth(sd) * 1.0;
   var ring = 0.0;
@@ -505,6 +498,7 @@ fn creature(p: vec2f, k: i32) -> vec2f {
   var o = gout(col, vec3f(0.0, 1.0, 0.0), v.pos.z, 2.0);
   let cw = fwidth(sd);
   o.c.a = smoothstep(-0.03 - cw, -0.03 + cw, sd); // alpha-to-coverage: analytic, antialiased coastline
+  if (NOMS && o.c.a < 0.5) { discard; } // no-MSAA tier: hard cut at the same coastline
   return o;
 }
 `;
@@ -579,9 +573,9 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   let a0 = A(uv);
   // ink lines: depth laplacian (exact MSAA depth) + normal + material discontinuities
   let ip = vec2i(floor(uv * f.rs.xy));
-  let ir = max(1, i32(round(1.25 * s * f.rs.z)));
+  let ir = max(1, i32(round(1.0 * s * f.rs.z)));
   let d0 = D(ip);
-  let r = (1.1 + 0.5 * vn(fp * 0.05)) * s;
+  let r = (0.75 + 0.3 * vn(fp * 0.05)) * s; // ink weight: thinner sampling radius
   var e = 0.0;
   let dsc = 1.0 / (f.cu.w * 12.0);
   for (var k = 0; k < 4; k++) {
@@ -620,7 +614,7 @@ fn sdSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 { let pa = p - a; let ba = b - a; 
   let lum = dot(g, vec3f(0.299, 0.587, 0.114));
   g = mix(vec3f(lum), g, 1.12);
   let ink = vec3f(0.13, 0.13, 0.22);
-  g = mix(g, ink, e * 0.85);
+  g = mix(g, ink, e * 0.6); // lighter ink so small props read cleanly
   // paper tint in highlights + grain
   let paperCol = vec3f(1.0, 0.985, 0.95);
   g *= mix(vec3f(1.0), paperCol, 0.6) * (0.965 + 0.05 * paper);

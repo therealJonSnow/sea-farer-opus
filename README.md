@@ -21,12 +21,29 @@ The wind blows from a fixed direction that drifts slowly. The boom swings to the
 - `?capture`: deterministic frame stepping through `window.__frame(t)`. It renders off-screen and reads the frame back.
 - `?offscreen`: renders without presenting to the canvas. Use it for headless runs.
 - `&w=…&h=…`: forces the render resolution.
+- `?q=0..7`: pins a quality level (see `docs/VERIFICATION.md`). Without it the adaptive controller picks one; add `&adaptive` to enable the controller in bench mode.
+- `?bench` options:
+  - `&secs=N` shortens the run.
+  - `&split` times the water separately from the other objects.
+  - `&budget=ms` sets the average-GPU budget for PASS/FAIL (default 11).
+  - `&offscreen&uncapped` keeps the GPU saturated.
+- `?shot=K&gpubench`: renders pose K 600 times and reports the median GPU time per pass.
 
 ## Build
 
 Source lives in `src/`. Run `node tools/build.mjs` to produce the minified `index.html`. First run `npm i` in `tools/`, which installs esbuild.
 
 ## Verification tools
+
+All tools launch your installed Chrome with its real GPU, and refuse to run on a software adapter. First run `npm i` in `tools/`, which installs esbuild, terser and Playwright. Environment variables:
+
+- `SF_BROWSER`: `chrome`, `chrome-canary`, `msedge`, `chromium` or a binary path.
+- `SF_HEADLESS`: `0` or `1`.
+- `SF_FLAGS`: extra Chrome flags.
+- `SF_HTML`: serve another build, for A/B comparisons.
+
+- `tools/gpubench.mjs`: robust per-pass GPU cost over the six poses.
+- `tools/alloc.mjs`: per-frame JS allocations, for the CPU path and for the full frame.
 
 - `tools/shoot.mjs`: renders the six poses at 2560×1440.
 - `tools/seq.mjs`: renders a contiguous frame sequence for temporal review.
