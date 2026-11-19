@@ -998,8 +998,10 @@ if (CAPTURE) {
     }
     sim(dt);
     frame(dt);
-    requestAnimationFrame(loop);
+    if (OFF) device.queue.onSubmittedWorkDone().then(raf);
+    else requestAnimationFrame(loop);
   };
+  const raf = () => requestAnimationFrame(loop);
   requestAnimationFrame(loop);
 }
 async function finishBench() {

@@ -733,8 +733,10 @@ if (CAPTURE) {
     }
     sim(dt);
     frame(dt);
-    requestAnimationFrame(loop);
+    // off-screen (headless) has no presentation back-pressure: wait for the GPU so work cannot pile up
+    if (OFF) device.queue.onSubmittedWorkDone().then(raf); else requestAnimationFrame(loop);
   };
+  const raf = () => requestAnimationFrame(loop);
   requestAnimationFrame(loop);
 }
 
