@@ -259,7 +259,7 @@ instances('crab', () => {
 });
 instances('gull', () => {
   inst.push(0, 0, 0, 1, 0, 0, 0, -1); // mast gull
-  for (let k = 0; k < 3; k++) inst.push(0, 7 + k * 1.5, 0, 1, 0, rnd() * 6.28, 8 + k * 3, 1); // follow boat
+  for (let k = 0; k < 3; k++) inst.push(0, 7 + k * 2.2, 0, 1, 0, k * 2.09 + 0.4, 8 + k * 4, 1); // follow boat
   for (const I of ISL) if (rnd() < 0.7) for (let k = 0; k < 1 + (rnd() * 2 | 0); k++) inst.push(I.x, 9 + rnd() * 6, I.z, 1, 0, rnd() * 6.28, I.R * 0.6 + 5 + rnd() * 8, 0);
 });
 

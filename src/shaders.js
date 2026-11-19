@@ -348,7 +348,7 @@ fn segD(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
   let pa = p - a; let ba = b - a; let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-5), 0.0, 1.0);
   return vec2f(length(pa - ba * h), h);
 }
-fn creature(p: vec2f, k: i32) -> f32 {
+fn creature(p: vec2f, k: i32) -> vec2f {
   let cr = isl.cr[k];
   let t = T();
   let a = cr.w + t * 0.045 * select(1.0, -1.0, k == 1);
@@ -356,7 +356,7 @@ fn creature(p: vec2f, k: i32) -> f32 {
   let fw = normalize(vec2f(-sin(a), cos(a)) * select(1.0, -1.0, k == 1));
   let sc = select(1.0, 0.75, k == 2);
   var q = p - ctr; q = vec2f(dot(q, fw), dot(q, vec2f(-fw.y, fw.x))) / sc;
-  if (dot(q, q) > 200.0) { return 0.0; }
+  if (dot(q, q) > 200.0) { return vec2f(0.0); }
   var d: f32;
   if (false) { // (manta removed: read as a smudge)
     let fl = 0.25 * sin(t * 1.3);
@@ -374,10 +374,14 @@ fn creature(p: vec2f, k: i32) -> f32 {
     d = min(d, tail);
     let fl = vec2f(q.x + 7.4, abs(q.y)); let fluke = length((fl - vec2f(0.0, 1.0)) / vec2f(0.55, 1.15)) - 1.0;
     d = min(d, fluke * 0.6);
-    let fin = length((vec2f(q.x - 1.6, abs(q.y) - 1.7)) / vec2f(0.9, 0.35)) - 1.0;
+    let fq = vec2f(q.x - 1.0, abs(q.y) - 1.9);
+    let fr = vec2f(fq.x * 0.85 + fq.y * 0.53, -fq.x * 0.53 + fq.y * 0.85);
+    let fin = length(fr / vec2f(0.55, 1.35)) - 1.0;
     d = min(d, fin * 0.5);
   }
-  return 1.0 - smoothstep(-0.35, 0.45, d * sc);
+  let body = 1.0 - smoothstep(-0.12, 0.22, d * sc);
+  let sp = (1.0 - smoothstep(0.1, 0.45, abs(q.y))) * smoothstep(-4.5, -1.0, q.x) * smoothstep(4.2, 1.5, q.x);
+  return vec2f(body, sp * body);
 }
 @fragment fn fs(v: WOut) -> GOut {
   let p = v.wp.xz; let t = T();
@@ -392,8 +396,11 @@ fn creature(p: vec2f, k: i32) -> f32 {
   c = mix(c, vec3f(0.55, 0.88, 0.80), (1.0 - smoothstep(0.0, 2.5, sd)) * 0.6);
   // creatures below
   var dark = 0.0;
-  for (var k = 0; k < 3; k++) { dark = max(dark, creature(p + 0.12 * vec2f(sin(p.y * 0.8 + t), cos(p.x * 0.7 + t)), k)); }
-  c = mix(c, vec3f(0.02, 0.22, 0.52), dark * 0.6 * smoothstep(1.0, 6.0, sd));
+  var spine = 0.0;
+  for (var k = 0; k < 3; k++) { let cv = creature(p + 0.05 * vec2f(sin(p.y * 0.8 + t), cos(p.x * 0.7 + t)), k); dark = max(dark, cv.x); spine = max(spine, cv.y); }
+  let cdepth = smoothstep(1.0, 6.0, sd);
+  c = mix(c, vec3f(0.03, 0.24, 0.55), dark * 0.62 * cdepth);
+  c = mix(c, vec3f(0.16, 0.50, 0.80), spine * 0.7 * cdepth);
   // cat's paws: wind gust patches sliding downwind
   let wq = vec2f(dot(p, wind), dot(p, vec2f(-wind.y, wind.x)));
   let gust = smoothstep(0.55, 0.78, fbm(vec2f(wq.x * 0.05 - t * 0.33, wq.y * 0.11)));
