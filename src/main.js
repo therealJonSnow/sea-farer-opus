@@ -743,7 +743,7 @@ if (CAPTURE) {
 
 async function finishBench() {
   const n = nf;
-  const st = a => { const s = Array.from(a).sort((x, y) => x - y); const avg = s.reduce((x, y) => x + y, 0) / s.length; return { avg: +avg.toFixed(3), p99: +s[Math.floor(s.length * 0.99)].toFixed(3), max: +s[s.length - 1].toFixed(3) }; };
+  const st = a => { const s = Array.from(a).sort((x, y) => x - y); if (!s.length) return null; const avg = s.reduce((x, y) => x + y, 0) / s.length; return { avg: +avg.toFixed(3), p99: +s[Math.floor(s.length * 0.99)].toFixed(3), max: +s[s.length - 1].toFixed(3) }; };
   const rep = { frames: n, size: [W, H], adapter: adapter.info && adapter.info.description, frameMs: st(ft.subarray(1, n)) };
   if (hasTS) {
     await device.queue.onSubmittedWorkDone();
@@ -752,7 +752,7 @@ async function finishBench() {
     await rb.mapAsync(GPUMapMode.READ);
     const v = new BigUint64Array(rb.getMappedRange());
     for (let i = 0; i < n; i++) gt[i] = Number(v[i * 2 + 1] - v[i * 2]) / 1e6;
-    rep.gpuMs = st(gt.subarray(0, n).filter(x => x > 0 && x < 1000));
+    rep.gpuMs = st(gt.subarray(0, n).filter(x => x > 0 && x < 1e5));
     rep.over16_7 = Array.from(gt.subarray(0, n)).filter(x => x > 16.7).length;
   }
   rep.framesOver16_7 = Array.from(ft.subarray(1, n)).filter(x => x > 16.7).length;
