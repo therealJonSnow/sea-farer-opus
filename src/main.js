@@ -14,6 +14,8 @@ const PITCH = 0.56, YAW = Math.PI / 4;
 let seed = 7;
 const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
 const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const len2 = (a, b) => Math.sqrt(a * a + b * b);
+const len3 = (a, b, c) => Math.sqrt(a * a + b * b + c * c);
 const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
 const hash = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); };
 const vnoise = (x, y) => {
@@ -38,12 +40,12 @@ for (let tries = 0; ISL.length < 22 && tries < 4000; tries++) {
   const a = rnd() * 6.283, d = 95 + rnd() * 520, x = Math.cos(a) * d, z = Math.sin(a) * d;
   const type = rnd() < 0.3 ? 0 : rnd() < 0.6 ? 1 : 2;
   const R = type === 0 ? 7 + rnd() * 6 : 14 + rnd() * 26;
-  if (ISL.some(i => Math.hypot(i.x - x, i.z - z) < (i.R + R) * 1.6 + 25)) continue;
+  if (ISL.some(i => len2(i.x - x, i.z - z) < (i.R + R) * 1.6 + 25)) continue;
   addIsland(x, z, R, type === 0 ? 0 : 4 + rnd() * 6, type);
 }
 const islR = (I, th) => I.R * (1 + I.a1 * Math.sin(2 * th + I.p1) + I.a2 * Math.sin(3 * th + I.p2) + I.a3 * Math.sin(5 * th + I.p3));
 function islH(I, x, z) {
-  const vx = x - I.x, vz = z - I.z, d = Math.hypot(vx, vz), th = Math.atan2(vz, vx);
+  const vx = x - I.x, vz = z - I.z, d = len2(vx, vz), th = Math.atan2(vz, vx);
   const r = islR(I, th), q = d / r;
   if (q >= 1) return Math.max(-5, -(q - 1) * I.R * 0.45);
   const n = fbm(x * 0.15, z * 0.15);
@@ -59,16 +61,17 @@ function islH(I, x, z) {
 }
 function shoreD(x, z) {
   let m = 1e9, mi = -1;
-  for (let i = 0; i < ISL.length; i++) { const I = ISL[i], d = Math.hypot(x - I.x, z - I.z) - islR(I, Math.atan2(z - I.z, x - I.x)); if (d < m) { m = d; mi = i; } }
-  _sdI = mi; return m;
+  for (let i = 0; i < ISL.length; i++) { const I = ISL[i], d = len2(x - I.x, z - I.z) - islR(I, Math.atan2(z - I.z, x - I.x)); if (d < m) { m = d; mi = i; } }
+  _sdI = mi; SD[0] = m;
 }
 let _sdI = -1;
+const SD = new Float64Array(2); // scratch: avoids boxing a float return value per call
 
 // ---------- mesh builder ----------
 const VB = [], IB = [];
 let vcount = 0;
 function vtx(p, n, c, kind, part, extra = 0) {
-  const l = Math.hypot(n[0], n[1], n[2]) || 1;
+  const l = len3(n[0], n[1], n[2]) || 1;
   VB.push(p[0], p[1], p[2], n[0] / l, n[1] / l, n[2] / l, c[0], c[1], c[2], c[3] ?? 0, kind, part, extra);
   return vcount++;
 }
@@ -240,9 +243,9 @@ for (const I of ISL) {
     const a = rnd() * 6.283, q = I.type === 0 ? 0.15 + rnd() * 0.55 : rnd() * 0.75, r = islR(I, a) * q;
     const x = I.x + Math.cos(a) * r, z = I.z + Math.sin(a) * r, y = islH(I, x, z);
     const gx = islH(I, x + 0.5, z) - islH(I, x - 0.5, z), gz = islH(I, x, z + 0.5) - islH(I, x, z - 0.5);
-    if (Math.hypot(gx, gz) > 0.35 || y < 0.4) continue;
+    if (len2(gx, gz) > 0.35 || y < 0.4) continue;
     const kind = I.type === 0 || y < 1.2 ? 0 : rnd() < 0.15 ? 2 : rnd() < 0.25 ? 0 : 1, rad = [3.4, 2.4, 2.2][kind];
-    if (treeSpots.some(t => Math.hypot(t[0] - x, t[2] - z) < rad + t[4])) continue;
+    if (treeSpots.some(t => len2(t[0] - x, t[2] - z) < rad + t[4])) continue;
     treeSpots.push([x, y - 0.1, z, kind, rad]);
     k++;
   }
@@ -280,12 +283,14 @@ function waveH(x, z, t) {
 }
 
 // ---------- simulation state ----------
-const S = { x: 0, z: 0, th: 2.3, u: 0, v: 0, w: 0, rud: 0, sheet: 0.55, boom: 0.6, boomV: 0, heel: 0, pitch: 0, y: 0, fill: 0, flap: 0, anch: 0, ax: 0, az: 0, adrop: 0, pen: 0, windA: WIND0, ws: 7, time: 0 };
+const S = { x: -0, z: -0, th: 2.3, u: -0, v: -0, w: -0, rud: -0, sheet: 0.55, boom: 0.6, boomV: -0, heel: -0, pitch: -0, y: -0, fill: -0, flap: -0, anch: -0, ax: -0, az: -0, adrop: -0, pen: -0, windA: WIND0, ws: 7.01, time: -0, wk: 0.5 };
+
 const keys = { s: 0, d: 0, i: 0, o: 0 };
 const wake = new Float32Array(48 * 4);
-let wakeT = 0;
+
 const streak = new Float32Array(24 * 4);
-const gullS = { st: 0, t: 0, x: 0, y: 0, z: 0, yaw: 0, fold: 0, flap: 0, bank: 0, vis: 1, sx: 0, sy: 0, sz: 0 };
+const gullS = { st: -0, t: -0, x: -0, y: -0, z: -0, yaw: -0, fold: -0, flap: -0, bank: -0, vis: 1, sx: -0, sy: -0, sz: -0 };
+
 let auto = BENCH || CAPTURE;
 
 function boatLocalToWorld(lx, ly, lz, out) {
@@ -312,12 +317,12 @@ function step(dt) {
   if (auto) {
     const W = WAY[wayI];
     let dx = W[0] - S.x, dz = W[1] - S.z;
-    if (Math.hypot(dx, dz) < 14) wayI = (wayI + 1) % WAY.length;
+    if (len2(dx, dz) < 14) wayI = (wayI + 1) % WAY.length;
     let want = Math.atan2(dx, dz);
     let rel = Math.atan2(Math.sin(want - S.windA - Math.PI), Math.cos(want - S.windA - Math.PI));
     if (Math.abs(rel) < 0.85) want = S.windA + Math.PI + (rel < 0 ? -0.85 : 0.85);
     // steer away from coasts
-    const sd = shoreD(S.x + fx * 10, S.z + fz * 10);
+    shoreD(S.x + fx * 10, S.z + fz * 10); const sd = SD[0];
     if (sd < 6) { const I = ISL[_sdI]; const ax = S.x - I.x, az = S.z - I.z; const cr = fx * az - fz * ax; want = S.th + (cr > 0 ? 0.9 : -0.9); }
     const err = Math.atan2(Math.sin(want - S.th), Math.cos(want - S.th));
     keys.s = err < -0.05 ? 1 : 0; keys.d = err > 0.05 ? 1 : 0;
@@ -328,7 +333,7 @@ function step(dt) {
   }
   // apparent wind in boat frame
   const vx = fx * S.u + rx * S.v, vz = fz * S.u + rz * S.v;
-  const ax = wx - vx, az = wz - vz, aw = Math.hypot(ax, az) + 1e-6;
+  const ax = wx - vx, az = wz - vz, aw = len2(ax, az) + 1e-6;
   const af = ax * fx + az * fz, ar = ax * rx + az * rz;
   const free = Math.atan2(ar, -af); // boom angle the wind wants (0 = aft)
   if (auto) {
@@ -339,7 +344,7 @@ function step(dt) {
     if (keys.o) S.sheet = Math.min(1, S.sheet + dt * 0.55);
   }
   const bmax = S.sheet * 1.48;
-  let target, alpha = 0, luff;
+  let target = 0, alpha = 0, luff = 0;
   if (Math.abs(free) <= bmax) { target = free; luff = 1; } else { target = Math.sign(free) * bmax; alpha = Math.abs(free) - bmax; luff = smooth(0.12, 0.0, alpha); }
   // boom dynamics (swings across on a gybe)
   S.boomV += ((target - S.boom) * 18 - S.boomV * 5.5) * dt;
@@ -376,21 +381,21 @@ function step(dt) {
   S.x += (nfx * S.u + Math.cos(S.th) * S.v) * dt;
   S.z += (nfz * S.u - Math.sin(S.th) * S.v) * dt;
   if (S.anch) {
-    const dx = S.x - S.ax, dz = S.z - S.az, d = Math.hypot(dx, dz), L = 9;
+    const dx = S.x - S.ax, dz = S.z - S.az, d = len2(dx, dz), L = 9;
     if (d > L) { S.x = S.ax + dx / d * L; S.z = S.az + dz / d * L; S.u *= 0.97; }
     // drift downwind gently
     S.x += Math.sin(S.windA) * 0.4 * dt; S.z += Math.cos(S.windA) * 0.4 * dt;
   }
   // islands: soft collision
-  const sd = shoreD(S.x, S.z);
+  shoreD(S.x, S.z); const sd = SD[0];
   if (sd < 2.4) {
-    const I = ISL[_sdI], dx = S.x - I.x, dz = S.z - I.z, d = Math.hypot(dx, dz);
+    const I = ISL[_sdI], dx = S.x - I.x, dz = S.z - I.z, d = len2(dx, dz);
     const push = (2.4 - sd);
     S.x += dx / d * push * Math.min(1, dt * 8); S.z += dz / d * push * Math.min(1, dt * 8);
     S.u *= Math.exp(-dt * 3);
   }
   // world bound: current pushes back far away
-  const rd = Math.hypot(S.x, S.z);
+  const rd = len2(S.x, S.z);
   if (rd > WORLD_R * 0.82) { const k = (rd - WORLD_R * 0.82) * 0.05 * dt; S.x -= S.x / rd * k * 10; S.z -= S.z / rd * k * 10; }
   // heel / bob
   S.heel += (clamp(side * 0.09, -0.35, 0.35) + S.rud * S.u * -0.012 - S.heel) * Math.min(1, dt * 2.5);
@@ -402,12 +407,17 @@ function step(dt) {
   // pennant points to apparent wind (local frame)
   const pa = Math.atan2(ar, -af);
   S.pen += Math.atan2(Math.sin(pa - S.pen), Math.cos(pa - S.pen)) * Math.min(1, dt * 6);
-  // wake history
-  wakeT += dt;
+  stepTrails(dt, t);
+  stepGull(dt);
+}
+// wake history + wind streak spawns (split out so each piece stays small enough for TurboFan)
+function stepTrails(dt, t) {
+  const nfx = Math.sin(S.th), nfz = Math.cos(S.th);
+  S.wk += dt;
   for (let i = 0; i < 48; i++) wake[i * 4 + 2] += dt;
   const spd = Math.abs(S.u);
-  if (wakeT > 0.22) {
-    wakeT = 0;
+  if (S.wk > 0.22) {
+    S.wk = 0;
     wake.copyWithin(4, 0, 47 * 4);
     wake[0] = S.x - nfx * 1.8; wake[1] = S.z - nfz * 1.8; wake[2] = 0; wake[3] = clamp(spd / 3.5, 0, 1);
   } else { wake[0] = S.x - nfx * 1.8; wake[1] = S.z - nfz * 1.8; wake[3] = clamp(spd / 3.5, 0, 1); }
@@ -421,7 +431,9 @@ function step(dt) {
       streak[o + 2] = t + (i % 7) * 0.5; streak[o + 3] = r1 * 0.7 + r2 * 0.3;
     }
   }
-  // seagull that lands on the mast top
+}
+// seagull that lands on the mast top
+function stepGull(dt) {
   const G = gullS; G.t += dt;
   boatLocalToWorld(0, 4.62, 0.55, tmp3);
   if (G.st === 0) { // circling
@@ -582,7 +594,8 @@ function resize() {
 }
 
 // ---------- camera ----------
-const cam = { x: 0, z: 0, vx: 0, vz: 0, zoom: 17 };
+const cam = { x: -0, z: -0, vx: -0, vz: -0, zoom: 17.01 };
+
 const M = new Float32Array(16), SM = new Float32Array(16);
 function ortho(out, ex, ey, ez, rx, ry, rz, ux, uy, uz, fx, fy, fz, hw, hh, n, fr) {
   // view: right/up/forward basis, eye e; ortho projection to clip (z 0..1)
@@ -609,10 +622,10 @@ function updateUniforms(dt) {
   const ex = cam.x - fx * D, ey = 1.5 - fy * D, ez = cam.z - fz * D;
   ortho(M, ex, ey, ez, rx, ry, rz, ux, uy, uz, fx, fy, fz, hw, hh, 1, 450);
   // shadow camera along sun, snapped to texels
-  const sx = -0.52, syy = 0.78, sz = 0.35, sl = Math.hypot(sx, syy, sz);
+  const sx = -0.52, syy = 0.78, sz = 0.35, sl = len3(sx, syy, sz);
   const lx = sx / sl, ly = syy / sl, lz = sz / sl; // dir TO sun
   const sfx = -lx, sfy = -ly, sfz = -lz;
-  let srx = sfz, sry = 0, srz = -sfx; const srl = Math.hypot(srx, srz); srx /= srl; srz /= srl;
+  let srx = sfz, sry = 0, srz = -sfx; const srl = len2(srx, srz); srx /= srl; srz /= srl;
   const sux = sry * sfz - srz * sfy, suy = srz * sfx - srx * sfz, suz = srx * sfy - sry * sfx;
   const ext = Math.max(90, hw * 1.25 + 10), tex = ext * 2 / SHADOW;
   let px = cam.x * srx + cam.z * srz, py = cam.x * sux + cam.z * suz, pz = cam.x * sfx + cam.z * sfz;
@@ -739,6 +752,7 @@ if (CAPTURE) {
     if (OFF) device.queue.onSubmittedWorkDone().then(raf); else requestAnimationFrame(loop);
   };
   const raf = () => requestAnimationFrame(loop);
+  if (BENCH) window.__cpu = n => { for (let i = 0; i < n; i++) { sim(1 / 180); updateUniforms(1 / 180); } };
   requestAnimationFrame(loop);
 }
 
